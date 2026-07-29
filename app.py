@@ -2,24 +2,28 @@ import sys
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QLabel, QPushButton,
+    QApplication, QMainWindow, QWidget, QLabel, QPushButton, QCheckBox,
     QVBoxLayout, QHBoxLayout, QFileDialog, QMessageBox
 )
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import Qt
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
-DEFAULT_DIR = "~" 
+from contour_detector import create_detection_visualization
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff"}
+DEFAULT_DIR = "/diehand/Dataset/"
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Defect Detector")
-        self.resize(1000, 650)
+        self.resize(1200, 650)
 
         self.image_paths = []   # 불러온 이미지 경로 리스트
         self.current_index = -1
+        self.original_pixmap = QPixmap()
+        self.result_pixmap = QPixmap()
 
         self._build_ui()
 
@@ -28,12 +32,23 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
 
-        # --- 이미지 표시 영역 ---
-        self.image_label = QLabel("Import Image")
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("border: 1px solid black;")
-        self.image_label.setFixedHeight(400)
-        root.addWidget(self.image_label)
+        # --- 좌측 원본 / 우측 검출 결과 표시 영역 ---
+        image_row = QHBoxLayout()
+        self.image_label = self._create_image_label("Import Image")
+        self.result_label = self._create_image_label(
+            "컨투어 항목을 선택한 뒤 Detect를 누르세요."
+        )
+
+        source_column = QVBoxLayout()
+        source_column.addWidget(QLabel("원본 이미지"))
+        source_column.addWidget(self.image_label)
+        image_row.addLayout(source_column)
+
+        result_column = QVBoxLayout()
+        result_column.addWidget(QLabel("검출 결과"))
+        result_column.addWidget(self.result_label)
+        image_row.addLayout(result_column)
+        root.addLayout(image_row)
 
         # --- 내비게이션 (◀ n/n ▶) ---
         nav = QHBoxLayout()
@@ -62,21 +77,40 @@ class MainWindow(QMainWindow):
         self.import_btn = QPushButton("Import..")
         self.detect_btn = QPushButton("Detect")
         self.quit_btn = QPushButton("Quit")
+        self.rectangle_checkbox = QCheckBox("사각형 컨투어")
+        self.ball_checkbox = QCheckBox("볼(원형) 컨투어")
+
         self.import_btn.clicked.connect(self.on_import)
+        self.detect_btn.clicked.connect(self.on_detect)
         self.quit_btn.clicked.connect(self.close)
+        self.rectangle_checkbox.toggled.connect(self._on_detection_option_changed)
+        self.ball_checkbox.toggled.connect(self._on_detection_option_changed)
+
         btn_col.addWidget(self.import_btn)
+        btn_col.addWidget(self.rectangle_checkbox)
+        btn_col.addWidget(self.ball_checkbox)
         btn_col.addWidget(self.detect_btn)
         btn_col.addWidget(self.quit_btn)
         bottom.addLayout(btn_col)
 
         root.addLayout(bottom)
+        self._update_detect_button_state()
+
+    @staticmethod
+    def _create_image_label(message):
+        """원본과 결과 이미지에 공통으로 쓰는 QLabel을 만든다."""
+        label = QLabel(message)
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("border: 1px solid black;")
+        label.setFixedHeight(400)
+        return label
 
     # ---------------- Import ----------------
     def on_import(self):
         dialog = QFileDialog(self, "Import", DEFAULT_DIR)
         dialog.setFileMode(QFileDialog.ExistingFiles)
         dialog.setOption(QFileDialog.DontUseNativeDialog, True)
-        dialog.setNameFilter("Images (*.png *.jpg *.jpeg *.bmp)")
+        dialog.setNameFilter("Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)")
         dialog.setLabelText(QFileDialog.Accept, "Choose")
 
         if dialog.exec_() != QFileDialog.Accepted:
@@ -108,9 +142,7 @@ class MainWindow(QMainWindow):
         self.current_index = 0
         self._show_current()
 
-
-# 네비게이션
-
+    # ---------------- Navigation ----------------
     def show_prev(self):
         if self.image_paths and self.current_index > 0:
             self.current_index -= 1
@@ -123,14 +155,93 @@ class MainWindow(QMainWindow):
 
     def _show_current(self):
         path = self.image_paths[self.current_index]
-        pixmap = QPixmap(str(path))
-        self.image_label.setPixmap(
-            pixmap.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        )
+        self.original_pixmap = QPixmap(str(path))
+        self._set_scaled_pixmap(self.image_label, self.original_pixmap)
         self.index_label.setText(f"{self.current_index + 1} / {len(self.image_paths)}")
-        self.info_label.setText(
-            f"File Name : {path}\nImage Size : {pixmap.width()} x {pixmap.height()}"
+
+        # 체크된 컨투어가 있으면 이미지 이동 시 자동으로 새 이미지를 검출한다.
+        if self._has_detection_option():
+            self._detect_current_image()
+        else:
+            self._clear_result("컨투어 항목을 하나 이상 선택하세요.")
+            self._show_current_info()
+
+    def on_detect(self):
+        """현재 체크박스 설정으로 현재 이미지를 검출한다."""
+        if not self.image_paths:
+            QMessageBox.information(self, "Detect", "먼저 이미지를 불러오세요.")
+            return
+        self._detect_current_image()
+
+    def _detect_current_image(self):
+        """컨투어 모듈을 호출하고 우측 결과 화면을 갱신한다."""
+        path = self.image_paths[self.current_index]
+        try:
+            result_image, result = create_detection_visualization(
+                path,
+                detect_rectangle=self.rectangle_checkbox.isChecked(),
+                detect_circles=self.ball_checkbox.isChecked(),
+            )
+        except ValueError as error:
+            self._clear_result("검출에 실패했습니다.")
+            QMessageBox.critical(self, "Detect", str(error))
+            return
+
+        self._show_result_image(result_image)
+        self._update_info_label(path, result)
+
+    def _show_result_image(self, bgr_image):
+        """OpenCV BGR 이미지를 QPixmap으로 바꿔 우측에 표시한다."""
+        height, width, _ = bgr_image.shape
+        qimage = QImage(
+            bgr_image.data,
+            width,
+            height,
+            bgr_image.strides[0],
+            QImage.Format_BGR888,
         )
+        # QImage가 NumPy 배열을 계속 참조하지 않도록 복사한다.
+        self.result_pixmap = QPixmap.fromImage(qimage.copy())
+        self._set_scaled_pixmap(self.result_label, self.result_pixmap)
+
+    @staticmethod
+    def _set_scaled_pixmap(label, pixmap):
+        """라벨 크기 안에서 원본 비율을 유지해 이미지를 표시한다."""
+        label.setPixmap(
+            pixmap.scaled(label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+
+    def _has_detection_option(self):
+        return self.rectangle_checkbox.isChecked() or self.ball_checkbox.isChecked()
+
+    def _on_detection_option_changed(self):
+        """아무 컨투어도 선택하지 않았을 때 Detect 버튼을 비활성화한다."""
+        self._update_detect_button_state()
+        if not self._has_detection_option():
+            self._clear_result("컨투어 항목을 하나 이상 선택하세요.")
+
+    def _update_detect_button_state(self):
+        self.detect_btn.setEnabled(self._has_detection_option())
+
+    def _clear_result(self, message):
+        self.result_pixmap = QPixmap()
+        self.result_label.setPixmap(QPixmap())
+        self.result_label.setText(message)
+
+    def _update_info_label(self, path, result=None):
+        """파일 정보와 마지막 검출 개수를 하단에 표시한다."""
+        lines = [
+            f"File Name : {path}",
+            f"Image Size : {self.original_pixmap.width()} x {self.original_pixmap.height()}",
+        ]
+        if result is not None:
+            lines.append(f"Rectangle : {int(result.rectangle is not None)}")
+            lines.append(f"Circle : {len(result.circles)}")
+        self.info_label.setText("\n".join(lines))
+
+    def _show_current_info(self):
+        path = self.image_paths[self.current_index]
+        self._update_info_label(path)
     
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Left:

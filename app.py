@@ -8,9 +8,9 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import Qt
 
-from contour_detector import create_detection_visualization
+from contour import create_detection_visualization
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 DEFAULT_DIR = "/diehand/Dataset/"
 
 
@@ -77,17 +77,17 @@ class MainWindow(QMainWindow):
         self.import_btn = QPushButton("Import..")
         self.detect_btn = QPushButton("Detect")
         self.quit_btn = QPushButton("Quit")
-        self.rectangle_checkbox = QCheckBox("사각형 컨투어")
-        self.ball_checkbox = QCheckBox("볼(원형) 컨투어")
+        self.surface_checkbox = QCheckBox("Surface 컨투어")
+        self.ball_checkbox = QCheckBox("Ball 컨투어")
 
         self.import_btn.clicked.connect(self.on_import)
         self.detect_btn.clicked.connect(self.on_detect)
         self.quit_btn.clicked.connect(self.close)
-        self.rectangle_checkbox.toggled.connect(self._on_detection_option_changed)
+        self.surface_checkbox.toggled.connect(self._on_detection_option_changed)
         self.ball_checkbox.toggled.connect(self._on_detection_option_changed)
 
         btn_col.addWidget(self.import_btn)
-        btn_col.addWidget(self.rectangle_checkbox)
+        btn_col.addWidget(self.surface_checkbox)
         btn_col.addWidget(self.ball_checkbox)
         btn_col.addWidget(self.detect_btn)
         btn_col.addWidget(self.quit_btn)
@@ -179,8 +179,8 @@ class MainWindow(QMainWindow):
         try:
             result_image, result = create_detection_visualization(
                 path,
-                detect_rectangle=self.rectangle_checkbox.isChecked(),
-                detect_circles=self.ball_checkbox.isChecked(),
+                detect_surface=self.surface_checkbox.isChecked(),
+                detect_balls=self.ball_checkbox.isChecked(),
             )
         except ValueError as error:
             self._clear_result("검출에 실패했습니다.")
@@ -212,7 +212,7 @@ class MainWindow(QMainWindow):
         )
 
     def _has_detection_option(self):
-        return self.rectangle_checkbox.isChecked() or self.ball_checkbox.isChecked()
+        return self.surface_checkbox.isChecked() or self.ball_checkbox.isChecked()
 
     def _on_detection_option_changed(self):
         """아무 컨투어도 선택하지 않았을 때 Detect 버튼을 비활성화한다."""
@@ -235,14 +235,14 @@ class MainWindow(QMainWindow):
             f"Image Size : {self.original_pixmap.width()} x {self.original_pixmap.height()}",
         ]
         if result is not None:
-            lines.append(f"Rectangle : {int(result.rectangle is not None)}")
-            lines.append(f"Circle : {len(result.circles)}")
+            lines.append(f"Surface : {int(result.surface is not None)}")
+            lines.append(f"Ball : {len(result.balls)}")
         self.info_label.setText("\n".join(lines))
 
     def _show_current_info(self):
         path = self.image_paths[self.current_index]
         self._update_info_label(path)
-    
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Left:
             self.show_prev()

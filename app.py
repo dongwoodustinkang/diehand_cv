@@ -231,12 +231,16 @@ class MainWindow(QMainWindow):
     def _update_info_label(self, path, result=None):
         """파일 정보와 마지막 검출 개수를 하단에 표시한다."""
         lines = [
-            f"File Name : {path}",
-            f"Image Size : {self.original_pixmap.width()} x {self.original_pixmap.height()}",
+            f"파일명 : {path}",
+            f"이미지 사이즈 : {self.original_pixmap.width()} x {self.original_pixmap.height()}",
         ]
         if result is not None:
-            lines.append(f"Surface : {int(result.surface is not None)}")
-            lines.append(f"Ball : {len(result.balls)}")
+            lines.append(f"표면 : {int(result.surface is not None)}")
+            lines.append(f"볼의 개수 : {len(result.balls)}")
+            for index, ball in enumerate(result.balls, start=1):
+                lines.append(
+                    f" - {index}번째 볼의 사이즈 : 반지름 {ball.radius}px"
+                )
         self.info_label.setText("\n".join(lines))
 
     def _show_current_info(self):

@@ -30,6 +30,8 @@ class DetectionResult:
 
 SURFACE_COLOR = (80, 255, 80) # GREEN(BGR)
 BALL_COLOR = (0, 0, 255) # RED(BGR)
+LEFT_ZONE_MAX = 0.35
+RIGHT_ZONE_MIN = 0.65
 
 
 
@@ -97,6 +99,48 @@ def detect_shapes(gray: np.ndarray, detect_surface=True, detect_balls=True):
     return DetectionResult(surface=surface, balls=balls)
 
 
+def select_balls_by_layout(
+    candidates, surface_left, surface_width):
+    """Ball 후보의 배치를 확인해 최종 검출 결과를 반환한다.
+
+    Ball이 0개면 빈 목록을, 1개면 해당 후보 하나를 그대로 반환한다.
+    2개 이상일 때는 기존의 좌·중앙·우 배치 규칙을 적용한다.
+    """
+    if len(candidates) <= 1:
+        return sorted(candidates, key=lambda ball: ball.x)
+
+    left_balls: List[BallDetection] = []
+    center_balls: List[BallDetection] = []
+    right_balls: List[BallDetection] = []
+
+    for ball in candidates:
+        relative_x = (ball.x - surface_left) / surface_width
+        if relative_x <= LEFT_ZONE_MAX:
+            left_balls.append(ball)
+        elif relative_x >= RIGHT_ZONE_MIN:
+            right_balls.append(ball)
+        else:
+            center_balls.append(ball)
+
+    # 볼이 두개인 경우
+    is_two_ball_layout = (
+        len(left_balls) == 1
+        and len(center_balls) == 0
+        and len(right_balls) == 1
+    )
+
+    # 볼이 세개인 경우
+    is_three_ball_layout = (
+        len(left_balls) == 1
+        and len(center_balls) == 1
+        and len(right_balls) == 1
+    )
+
+    if is_two_ball_layout or is_three_ball_layout:
+        return sorted(candidates, key=lambda ball: ball.x)
+    return []
+
+
 def find_surface_contour(gray: np.ndarray):
     """ 사각형 표면을 탐지하는 함수 """
     height, width = gray.shape
@@ -132,43 +176,47 @@ def find_surface_contour(gray: np.ndarray):
 
 
 def find_balls_contours(gray: np.ndarray, surface: SurfaceDetection):
-    """볼의 위치를 탐지해내는 함수"""
+    """### 볼의 위치를 탐지해내는 함수
+    1. Surface의 Contour를 찾아냄
+    2. ROI(관심영역) 추출
+    3. 블러링으로 노이즈 제거
+    4. 허프 변환으로 원 탐지
+    5. 볼들의 위치 반환
+    
+    """
     image_height, _ = gray.shape
     x, y, surface_width, surface_height = surface.x, surface.y, surface.width, surface.height
     
-    # ROI 설정 (직사각형 표면 아래 영역)
-    roi_top = max(0, y + surface_height - round(image_height * 0.04))
-    roi_bottom = min(image_height, y + surface_height + round(image_height * 0.08))
-    wheel_roi = gray[roi_top:roi_bottom, x : x + surface_width]
-    blurred_roi = cv2.GaussianBlur(wheel_roi, (5, 5), 0) # 5x5 크기의 가우시안 필터로 노이즈 제거해서 큰 흰색 표면의 굴곡이 윤곽선으로 잡히는 것을 방지함
+    # ROI 설정 (y + surface_height : 직사각형 표면 아래 영역)
+    roi_top = max(0, y + surface_height - round(image_height * 0.03)) #12px (400 x 0.03), 즉 surface_bottom 보다 12px 위에서 부터 시작
+    roi_bottom = min(image_height, y + surface_height + round(image_height * 0.08)) #32px (400 x 0.08), 즉 surface_bottom 보다 32px 아래로
+    cropped_roi = gray[roi_top:roi_bottom, x : x + surface_width] # 볼 위치 부분만 잘라냄
+    blurred_roi = cv2.GaussianBlur(cropped_roi, (5, 5), 0) # 5x5 크기의 가우시안 필터로 노이즈 제거해서 큰 흰색 표면의 굴곡이 윤곽선으로 잡히는 것을 방지함
 
     # 허프 변환을 이용한 원탐지
     detected_circles = cv2.HoughCircles(
-        blurred_roi,
+        blurred_roi, # 볼이 있는 이미지 부분
         cv2.HOUGH_GRADIENT,
-        dp = 1.0,
+        dp = 1.0, # 내부 해상도
         minDist = round(surface_width * 0.16), # 원들 사이의 최소 거리
-        param1 = 50,
-        param2 = 12, # 원이라고 판단할 최소한의 점수
-        minRadius = max(4, round(image_height * 0.01)), # 최소 반지름
-        maxRadius = round(image_height * 0.04), # 최대 반지름
+        param1 = 50, # 약한 테두리 무시되는 정도 (높을수록 확실한 테두리만 탐지)
+        param2 = 12, # 원이라고 판단할 최소한의 점수 (낮을수록 원 탐지에 관대해짐)
+        minRadius = max(4, round(image_height * 0.01)), # 허용 최소 반지름
+        maxRadius = round(image_height * 0.04), # 하용최대 반지름
     )
+
     if detected_circles is None:
         return []
     
-    detections: list[BallDetection] = []
+    candidates: List[BallDetection] = []
     for center_x, center_y, radius in np.round(detected_circles[0]).astype(int):
-        # 볼의 상대적 위치 계산
-        relative_x = center_x / surface_width
-        is_near_an_edge = relative_x <= 0.35 or relative_x >= 0.65 # 직사각형 표면 아래 좌측 35%, 우측 35%에 있는 원만 바퀴로 인정
-        if is_near_an_edge:
-            detections.append(
-                BallDetection(
-                    int(x + center_x), int(roi_top + center_y), int(radius)
-                )
+        candidates.append(
+            BallDetection(
+                int(x + center_x), int(roi_top + center_y), int(radius)
             )
-    
-    return sorted(detections, key=lambda ball:ball.x)
+        )
+
+    return select_balls_by_layout(candidates, x, surface_width)
 
 
     

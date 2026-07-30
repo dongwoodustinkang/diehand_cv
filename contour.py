@@ -142,17 +142,23 @@ def select_balls_by_layout(
 
 
 def find_surface_contour(gray: np.ndarray):
-    """ 사각형 표면을 탐지하는 함수 """
+    """### 사각형 표면을 탐지하는 함수 
+    1. 마스크 생성 (밝기 235 이상 -> 검정, 235 미만 -> 흰색)
+    2. 모폴로지 opening 연산으로 노이즈 제거 및 표면만 남기기
+    3. 바깥 윤곽선만 찾음
+    4. 후보군 필터링
+    5. 가장 큰 박스를 표면으로 선택
+    """
     height, width = gray.shape
-    _, mask = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY_INV) # 마스크 생성  
+    _, mask = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY_INV) # 마스크 생성  (밝기 235 이상 -> 검정, 235 미만 -> 흰색)
 
     # 마스크 구조 작업
     horizontal_kernel_width = max(3,round(width * 0.333)) # 전체 이미지의 33.3% 크기의 가로 (최소 3픽셀 이상)
-    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (horizontal_kernel_width,3)) # 가로 세로(3px) 크기의 커널
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (horizontal_kernel_width,5)) # 가로 세로(3px) 크기의 커널을 남김  (직사각형, (크기))
     surface_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, horizontal_kernel) # 모폴로지 opening 연산으로 노이즈 제거 및 표면만 남기기
 
-    # 윤곽선 찾고 후보군 필터링
-    contours, _ = cv2.findContours(surface_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # 정리된 마스크에서 윤곽선 찾고 후보군 필터링
+    contours, _ = cv2.findContours(surface_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) # 바깥 윤곽선만 찾음
     candidates: list[tuple[float, tuple[int, int, int, int]]] = []
 
     for contour in contours:
@@ -161,7 +167,7 @@ def find_surface_contour(gray: np.ndarray):
 
         is_wide_enough = box_width >= width * 0.3 # 박스 너비가 이미지 전체 너비의 30% 이상인지
         is_lower_part = y >= height * 0.25 # y좌표가 이미지 전체 높이의 25% 지점보다 아래인지?
-        is_surface_like = aspect_ratio >= 2.5 # 가로 세로 비율이 2.5 이상인지
+        is_surface_like = aspect_ratio >= 2.5 # 가로가 세로보다 2.5배 이상인지
 
         if is_wide_enough and is_lower_part and is_surface_like:
             # 3가지 조건 모두 만족하면 박스의 너비를 점수로 산정해 후보 목록에 담는다.

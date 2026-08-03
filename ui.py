@@ -330,7 +330,9 @@ class MainWindow(QMainWindow):
             self._set_scaled_pixmap(self.result_label, self.result_pixmap)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Left:
+        if event.key() == Qt.Key_Escape:
+            self.close()
+        elif event.key() == Qt.Key_Left:
             self.show_prev()
         elif event.key() == Qt.Key_Right:
             self.show_next()

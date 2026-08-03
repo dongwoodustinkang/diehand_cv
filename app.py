@@ -5,13 +5,14 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QCheckBox,
     QVBoxLayout, QHBoxLayout, QFileDialog, QMessageBox
 )
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QIcon, QImage, QPixmap
 from PyQt5.QtCore import Qt
 
 from contour import create_detection_visualization
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 DEFAULT_DIR = "/diehand/Dataset/"
+APP_ICON_PATH = Path(__file__).parent / "assets" / "detector-icon.png"
 
 
 class MainWindow(QMainWindow):
@@ -258,6 +259,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())

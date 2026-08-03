@@ -30,6 +30,7 @@ class DetectionResult:
 
 SURFACE_COLOR = (80, 255, 80) # GREEN(BGR)
 BALL_COLOR = (0, 0, 255) # RED(BGR)
+SURFACE_LINE_THICKNESS = 1
 LEFT_ZONE_MAX = 0.35
 RIGHT_ZONE_MIN = 0.65
 
@@ -66,7 +67,7 @@ def draw_detections(gray: np.ndarray, result:DetectionResult):
             (surface.x, surface.y),
             (surface.x + surface.width, surface.y + surface.height),
             SURFACE_COLOR,
-            2, # 굵기
+            SURFACE_LINE_THICKNESS, # 두께
         )
     
     for i, ball in enumerate(result.balls, start=1):
@@ -204,11 +205,11 @@ def find_balls_contours(gray: np.ndarray, surface: SurfaceDetection):
         blurred_roi, # 볼이 있는 이미지 부분
         cv2.HOUGH_GRADIENT,
         dp = 1.0, # 내부 해상도
-        minDist = round(surface_width * 0.16), # 원들 사이의 최소 거리
+        minDist = round(surface_width * 0.16), # 원의 중심과 최소거리
         param1 = 50, # 약한 테두리 무시되는 정도 (높을수록 확실한 테두리만 탐지)
         param2 = 12, # 원이라고 판단할 최소한의 점수 (낮을수록 원 탐지에 관대해짐)
         minRadius = max(4, round(image_height * 0.01)), # 허용 최소 반지름
-        maxRadius = round(image_height * 0.04), # 하용최대 반지름
+        maxRadius = round(image_height * 0.04), # 하용 최대 반지름
     )
 
     if detected_circles is None:

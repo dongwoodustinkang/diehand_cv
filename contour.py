@@ -31,6 +31,9 @@ class DetectionResult:
 SURFACE_COLOR = (80, 255, 80) # GREEN(BGR)
 BALL_COLOR = (0, 0, 255) # RED(BGR)
 SURFACE_LINE_THICKNESS = 1
+SURFACE_ROI_PADDING_RATIO = 0.02 # 1차 컨투어 후 여유공간 비율
+SURFACE_MAX_BRIGHTNESS = 235
+SURFACE_OTSU_MARGIN = 30
 LEFT_ZONE_MAX = 0.35
 RIGHT_ZONE_MIN = 0.65
 
@@ -95,7 +98,10 @@ def detect_shapes(gray: np.ndarray, detect_surface=True, detect_balls=True):
         find_balls_contours(gray, base_surface)
         if detect_balls and base_surface is not None else []
     )
-    surface = base_surface if detect_surface else None
+    surface = (
+        find_bright_surface_contour(gray, base_surface)
+        if detect_surface and base_surface is not None else None
+    )
 
     return DetectionResult(surface=surface, balls=balls)
 
@@ -140,6 +146,77 @@ def select_balls_by_layout(
     if is_two_ball_layout or is_three_ball_layout:
         return sorted(candidates, key=lambda ball: ball.x)
     return []
+
+
+def crop_surface_roi(gray, surface, padding_ratio=SURFACE_ROI_PADDING_RATIO):
+    """1차 표면 박스에 여유공간 두어 ROI와 원본 기준 시작 좌표를 반환"""
+    height, width = gray.shape
+
+    pad_x = max(5, round(surface.width * padding_ratio))
+    pad_y = max(5, round(surface.height * padding_ratio))
+
+    roi_left = max(0, surface.x - pad_x)
+    roi_top = max(0, surface.y - pad_y)
+    roi_right = min(width, surface.x + surface.width + pad_x)
+    roi_bottom = min(height, surface.y + surface.height + pad_y)
+
+    roi = gray[roi_top:roi_bottom, roi_left:roi_right]
+    return roi, (roi_left, roi_top)
+
+
+def binarize_surface_roi(surface_roi):
+    """밝은 회색 패널을 흰색으로, 어두운 면과 크랙을 검정으로 분리"""
+    otsu_threshold, _ = cv2.threshold(
+        surface_roi,
+        140,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+    )
+    min_brightness = max(0, round(otsu_threshold) - SURFACE_OTSU_MARGIN)
+    binary_roi = cv2.inRange(
+        surface_roi,
+        min_brightness,
+        SURFACE_MAX_BRIGHTNESS,
+    )
+    return binary_roi
+
+
+def find_bright_surface_contour(gray, base_surface):
+    """1차 표면 박스 안에서 밝은 회색 패널의 최종 컨투어 찾기."""
+    surface_roi, (roi_left, roi_top) = crop_surface_roi(gray, base_surface)
+    binary_roi = binarize_surface_roi(surface_roi) # 이진화
+
+    # 작은 크랙 때문에 패널이 끊어지지 않도록 약하게 연결한다.
+    crack_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+    crack_filled = cv2.morphologyEx(binary_roi, cv2.MORPH_CLOSE, crack_kernel)
+
+    # 세로 방향으로 이어진 어두운 면·부품은 제거하고 넓은 패널만 남긴다.
+    roi_height, roi_width = surface_roi.shape
+    horizontal_kernel_width = max(3, round(roi_width * 0.333))
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(horizontal_kernel_width, 5),)
+    panel_mask = cv2.morphologyEx(crack_filled,cv2.MORPH_OPEN,horizontal_kernel)
+
+    contours, _ = cv2.findContours(panel_mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    candidates = []
+
+    for contour in contours:
+        local_x, local_y, box_width, box_height = cv2.boundingRect(contour)
+        aspect_ratio = box_width / max(box_height, 1)
+
+        is_wide_enough = box_width >= roi_width * 0.55
+        is_tall_enough = box_height >= roi_height * 0.25
+        is_panel_like = aspect_ratio >= 2.5
+
+        if is_wide_enough and is_tall_enough and is_panel_like:
+            score = box_width * box_height
+            candidates.append((score, (local_x, local_y, box_width, box_height)))
+
+    if not candidates:
+        return base_surface
+
+    _, (local_x, local_y, box_width, box_height) = max(candidates,key=lambda item: item[0])
+    
+    return SurfaceDetection(roi_left + local_x, roi_top + local_y, box_width, box_height)
 
 
 def find_surface_contour(gray: np.ndarray):

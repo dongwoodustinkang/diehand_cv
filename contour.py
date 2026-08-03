@@ -30,9 +30,10 @@ class DetectionResult:
 
 SURFACE_COLOR = (80, 255, 80) # GREEN(BGR)
 BALL_COLOR = (0, 0, 255) # RED(BGR)
-SURFACE_LINE_THICKNESS = 1
+LINE_THICKNESS = 1
 SURFACE_ROI_PADDING_RATIO = 0.02 # 1차 컨투어 후 여유공간 비율
 SURFACE_MAX_BRIGHTNESS = 235
+SURFACE_MIN_BRIGHTNESS = 110
 SURFACE_OTSU_MARGIN = 30
 LEFT_ZONE_MAX = 0.35
 RIGHT_ZONE_MIN = 0.65
@@ -70,7 +71,7 @@ def draw_detections(gray: np.ndarray, result:DetectionResult):
             (surface.x, surface.y),
             (surface.x + surface.width, surface.y + surface.height),
             SURFACE_COLOR,
-            SURFACE_LINE_THICKNESS, # 두께
+            LINE_THICKNESS, # 두께
         )
     
     for i, ball in enumerate(result.balls, start=1):
@@ -79,7 +80,7 @@ def draw_detections(gray: np.ndarray, result:DetectionResult):
             (ball.x, ball.y),
             ball.radius,
             BALL_COLOR,
-            2, # 굵기
+            LINE_THICKNESS, # 굵기
         )
     return visualized
 
@@ -168,11 +169,11 @@ def binarize_surface_roi(surface_roi):
     """밝은 회색 패널을 흰색으로, 어두운 면과 크랙을 검정으로 분리"""
     otsu_threshold, _ = cv2.threshold(
         surface_roi,
-        140,
+        0,
         255,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU,
     )
-    min_brightness = max(0, round(otsu_threshold) - SURFACE_OTSU_MARGIN)
+    min_brightness = min(max(0, round(otsu_threshold) - SURFACE_OTSU_MARGIN), SURFACE_MIN_BRIGHTNESS)
     binary_roi = cv2.inRange(
         surface_roi,
         min_brightness,
@@ -183,6 +184,7 @@ def binarize_surface_roi(surface_roi):
 
 def find_bright_surface_contour(gray, base_surface):
     """1차 표면 박스 안에서 밝은 회색 패널의 최종 컨투어 찾기."""
+
     surface_roi, (roi_left, roi_top) = crop_surface_roi(gray, base_surface)
     binary_roi = binarize_surface_roi(surface_roi) # 이진화
 
@@ -196,27 +198,30 @@ def find_bright_surface_contour(gray, base_surface):
     horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(horizontal_kernel_width, 5),)
     panel_mask = cv2.morphologyEx(crack_filled,cv2.MORPH_OPEN,horizontal_kernel)
 
-    contours, _ = cv2.findContours(panel_mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(panel_mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE) # 외곽 컨투어 추출
     candidates = []
 
     for contour in contours:
+
+        # ROI 내부(1차 컨투어) 기준 2차 컨투어 정보
         local_x, local_y, box_width, box_height = cv2.boundingRect(contour)
         aspect_ratio = box_width / max(box_height, 1)
 
-        is_wide_enough = box_width >= roi_width * 0.55
-        is_tall_enough = box_height >= roi_height * 0.25
-        is_panel_like = aspect_ratio >= 2.5
+        # 후보군 필터링 조건
+        is_wide_enough = box_width >= roi_width * 0.55 # ROI 폭 55% 이상
+        is_tall_enough = box_height >= roi_height * 0.25 # ROI 높이 25% 이상
+        is_panel_like = aspect_ratio >= 2.5 # 가로세로비 2.5 이상
 
         if is_wide_enough and is_tall_enough and is_panel_like:
             score = box_width * box_height
             candidates.append((score, (local_x, local_y, box_width, box_height)))
 
-    if not candidates:
+    if not candidates: # 후보군이 없다면 1차 컨투어를 반환
         return base_surface
 
     _, (local_x, local_y, box_width, box_height) = max(candidates,key=lambda item: item[0])
     
-    return SurfaceDetection(roi_left + local_x, roi_top + local_y, box_width, box_height)
+    return SurfaceDetection(roi_left + local_x, roi_top + local_y, box_width, box_height) # 원본 좌표 (볼 탐지를 위해 사용)
 
 
 def find_surface_contour(gray: np.ndarray):

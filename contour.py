@@ -30,11 +30,12 @@ class DetectionResult:
 
 SURFACE_COLOR = (80, 255, 80) # GREEN(BGR)
 BALL_COLOR = (0, 0, 255) # RED(BGR)
-LINE_THICKNESS = 1
+LINE_THICKNESS = 1 # 두께
 SURFACE_ROI_PADDING_RATIO = 0.02 # 1차 컨투어 후 여유공간 비율
 SURFACE_MAX_BRIGHTNESS = 235
 SURFACE_MIN_BRIGHTNESS = 110
 SURFACE_OTSU_MARGIN = 30
+SURFACE_BALL_GAP = 2 # 볼과 표면간의 간경 (y좌표)
 LEFT_ZONE_MAX = 0.35
 RIGHT_ZONE_MIN = 0.65
 
@@ -95,15 +96,16 @@ def detect_shapes(gray: np.ndarray, detect_surface=True, detect_balls=True):
         return DetectionResult(surface=None, balls=[])
 
     base_surface = find_surface_contour(gray)
-    balls = (
+    detected_balls = (
         find_balls_contours(gray, base_surface)
-        if detect_balls and base_surface is not None else []
+        if (detect_surface or detect_balls) and base_surface is not None else []
     )
     surface = (
-        find_bright_surface_contour(gray, base_surface)
+        find_bright_surface_contour(gray, base_surface, detected_balls)
         if detect_surface and base_surface is not None else None
     )
 
+    balls = detected_balls if detect_balls else []
     return DetectionResult(surface=surface, balls=balls)
 
 
@@ -182,8 +184,30 @@ def binarize_surface_roi(surface_roi):
     return binary_roi
 
 
-def find_bright_surface_contour(gray, base_surface):
+def keep_surface_above_balls(surface, balls):
+    """패널의 표면 하단이 볼의 상단보다 낮아지지 않게 조정"""
+    surface_bottom = surface.y + surface.height # 기존 표면 y 좌표
+    safe_bottom = surface_bottom # 수정될 표면 y좌표 
+
+    for ball in balls:
+        ball_top = ball.y - ball.radius # 볼의 상단
+        overlaps_vertically = ball_top <= surface_bottom and ball.y > surface.y # 볼이 패널 위에 있는지 확인
+
+        if overlaps_vertically:
+            safe_bottom = min(safe_bottom, ball_top - SURFACE_BALL_GAP) # 새로운 표면 하단 결정 (기존 표면 y 좌표, 볼보다 안전 갭 위쪽)
+
+    adjusted_height = safe_bottom - surface.y # 조정된 표면 y 좌표
+    minimum_height = max(1, round(surface.height * 0.25)) # 최소 높이
+
+    if adjusted_height < minimum_height:
+        return surface
+
+    return SurfaceDetection(surface.x, surface.y, surface.width, adjusted_height)
+
+
+def find_bright_surface_contour(gray, base_surface, balls=None):
     """1차 표면 박스 안에서 밝은 회색 패널의 최종 컨투어 찾기."""
+    balls = balls or []
 
     surface_roi, (roi_left, roi_top) = crop_surface_roi(gray, base_surface)
     binary_roi = binarize_surface_roi(surface_roi) # 이진화
@@ -213,15 +237,21 @@ def find_bright_surface_contour(gray, base_surface):
         is_panel_like = aspect_ratio >= 2.5 # 가로세로비 2.5 이상
 
         if is_wide_enough and is_tall_enough and is_panel_like:
-            score = box_width * box_height
-            candidates.append((score, (local_x, local_y, box_width, box_height)))
+            candidate = SurfaceDetection(
+                roi_left + local_x,
+                roi_top + local_y,
+                box_width,
+                box_height,
+            )
+            candidate = keep_surface_above_balls(candidate, balls)
+            score = candidate.width * candidate.height
+            candidates.append((score, candidate))
 
     if not candidates: # 후보군이 없다면 1차 컨투어를 반환
-        return base_surface
+        return keep_surface_above_balls(base_surface, balls)
 
-    _, (local_x, local_y, box_width, box_height) = max(candidates,key=lambda item: item[0])
-    
-    return SurfaceDetection(roi_left + local_x, roi_top + local_y, box_width, box_height) # 원본 좌표 (볼 탐지를 위해 사용)
+    _, surface = max(candidates, key=lambda item: item[0])
+    return surface
 
 
 def find_surface_contour(gray: np.ndarray):

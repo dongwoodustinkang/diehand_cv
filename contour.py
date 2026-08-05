@@ -21,8 +21,8 @@ class BallDetection:
 
 @dataclass
 class DetectionResult:
-    surface: Optional[SurfaceDetection] = None
-    balls: List[BallDetection] = field(default_factory=list)
+    surface: Optional[SurfaceDetection] = None # 표면이 감지된 결과 정보
+    balls: List[BallDetection] = field(default_factory=list) # 감지된 공들의 리스트
 
 
 
@@ -59,6 +59,106 @@ def create_detection_visualization(
         detect_surface=detect_surface,
         detect_balls=detect_balls,
     )
+
+
+def create_contour_preview_visualizations(image_path, result: DetectionResult):
+    """### 컨투어 내부 표면 및 볼의 이미지 프리뷰
+    - 이미지, DetectionResult를 인자로 받음
+    - 표면과 공 프리뷰 이미지를 반환함
+    """
+    
+    # 이미지를 흑백 사진으로 불러옴
+    gray_image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if gray_image is None:
+        raise ValueError(f"이미지를 읽을 수 없습니다: {image_path}")
+
+    # 흑백 이미지를 컬러 이미지로 변경
+    original_bgr = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
+    # 흑백 이미지에 공의 위치를 그려주는 함수
+    balls_only = draw_detections(
+        gray_image,
+        DetectionResult(balls=result.balls), # 공 정보
+    )
+
+    # 표면 프리뷰 이미지 생성
+    surface_preview = (
+        _crop_surface_preview(original_bgr, result.surface)
+        if result.surface is not None else None
+    )
+
+    # 공 프리뷰 이미지 생성
+    balls_preview = (
+        _crop_balls_preview(balls_only, result.balls)
+        if result.balls else None
+    )
+    return surface_preview, balls_preview
+
+
+
+def _crop_surface_preview(image: np.ndarray, surface: SurfaceDetection):
+    """### 표면 Crop 함수
+    - 이미지, 표면 정보를 인자로 받음
+    - 표면 컨투어링 부분을 Crop한 이미지 반환
+    """
+    left = max(0, surface.x) # 시작 x좌표가 0보다 커야함
+    top = max(0, surface.y) # 시작 y좌표가 0보다 커야함
+    right = min(image.shape[1], surface.x + surface.width) # 끝 x좌표가 이미지 너비보다 클 수 없음
+    bottom = min(image.shape[0], surface.y + surface.height) # 끝 y좌표가 이미지 높이보다 클 수 없음
+    return image[top:bottom, left:right].copy()
+
+
+def _crop_balls_preview(image: np.ndarray, balls: List[BallDetection]):
+    """### 볼 Crop 함수
+    - 이미지, 볼 정보를 인자로 받음
+    - 볼 컨투어링 부분을 Crop한 이미지 반환
+    """
+    # 기본 설정
+    preview_padding = LINE_THICKNESS + 3 # 테두리 바깥쪽 여유 공간
+    background_color = (251, 250, 249)  # #F9FAFB in BGR
+    ball_previews = [] # 잘라낸 볼들을 모아둘 빈 리스트
+
+    for ball in sorted(balls, key=lambda item: item.x):
+        # 공 하나씩 잘라내고 배경 정리
+        left = max(0, ball.x - ball.radius - preview_padding)
+        top = max(0, ball.y - ball.radius - preview_padding)
+        right = min(image.shape[1], ball.x + ball.radius + preview_padding + 1)
+        bottom = min(image.shape[0], ball.y + ball.radius + preview_padding + 1)
+        cropped = image[top:bottom, left:right] # ROI 영역만 사각형으로 1차 잘라냄
+
+        # 마스크 영역 생성
+        mask = np.zeros(cropped.shape[:2], dtype=np.uint8)
+        cv2.circle(
+            mask,
+            (ball.x - left, ball.y - top),
+            ball.radius + LINE_THICKNESS,
+            255,
+            -1,
+        )
+        
+        ball_preview = np.empty_like(cropped)
+        ball_preview[:] = background_color
+        ball_preview[mask > 0] = cropped[mask > 0]
+        ball_previews.append(ball_preview)
+
+    # 공 나란히 이어 붙이기
+    gap = max(8, round(max(ball.radius for ball in balls) * 0.75))
+    preview_height = max(preview.shape[0] for preview in ball_previews)
+    preview_width = sum(preview.shape[1] for preview in ball_previews) + gap * (
+        len(ball_previews) - 1
+    )
+    preview = np.empty((preview_height, preview_width, 3), dtype=image.dtype)
+    preview[:] = background_color
+
+    offset_x = 0
+    for ball_preview in ball_previews:
+        offset_y = (preview_height - ball_preview.shape[0]) // 2
+        preview[
+            offset_y : offset_y + ball_preview.shape[0],
+            offset_x : offset_x + ball_preview.shape[1],
+        ] = ball_preview
+        offset_x += ball_preview.shape[1] + gap
+    return preview
+
 
 def draw_detections(gray: np.ndarray, result:DetectionResult):
     """이미지에 컨투어 라인을 그리는 함수"""

@@ -27,7 +27,7 @@ from styles import APP_STYLESHEET
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-DEFAULT_DIR = "/diehand/Dataset/"
+DEFAULT_DIR = "dataset/"
 
 
 class MainWindow(QMainWindow):

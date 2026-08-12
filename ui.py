@@ -6,7 +6,6 @@ from time import perf_counter
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
-    QCheckBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -19,19 +18,16 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from contour import (
-    create_contour_preview_visualizations,
-    create_detection_visualization,
-)
+from contour import create_detection_visualization
 from styles import APP_STYLESHEET
 
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+IMAGE_EXTS = {".tif", ".tiff"}
 DEFAULT_DIR = "dataset/"
 
 
 class MainWindow(QMainWindow):
-    """이미지 불러오기와 컨투어 검출을 위한 메인 창."""
+    """A/B TIFF의 B 페이지 컨투어를 확인하는 메인 창."""
 
     def __init__(self):
         super().__init__()
@@ -42,9 +38,7 @@ class MainWindow(QMainWindow):
         self.image_paths = []
         self.current_index = -1
         self.original_pixmap = QPixmap() # 원본 이미지
-        self.result_pixmap = QPixmap() # 컨투어 결과 이미지
-        self.surface_preview_pixmap = QPixmap() # 표면 Preview 
-        self.ball_preview_pixmap = QPixmap() # 볼 Preview
+        self.result_pixmap = QPixmap() # B 페이지 이미지
         self._build_ui()
 
     def _build_ui(self):
@@ -61,7 +55,6 @@ class MainWindow(QMainWindow):
         root.addLayout(self._create_workspace(), stretch=1)
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
-        self._update_detect_button_state()
 
     def _create_header(self):
         header = QHBoxLayout()
@@ -71,7 +64,7 @@ class MainWindow(QMainWindow):
         title_group.setSpacing(2)
         title = QLabel("Die 이상 탐지 프로그램")
         title.setObjectName("windowTitle")
-        subtitle = QLabel("표면 및 볼 부분 컨투어링")
+        subtitle = QLabel("B 페이지 컨투어 첫 접점 분석")
         subtitle.setObjectName("subtitle")
         title_group.addWidget(title)
         title_group.addWidget(subtitle)
@@ -104,10 +97,10 @@ class MainWindow(QMainWindow):
         image_row = QHBoxLayout()
         image_row.setSpacing(16)
         source_card, self.image_label = self._create_image_card(
-            "원본", "이미지를 불러와 검사를 시작하세요."
+            "A 페이지", "A/B TIFF 이미지를 불러오세요."
         )
         result_card, self.result_label = self._create_image_card(
-            "검출 결과", "검출 옵션을 선택한 뒤 검출을 시작하세요."
+            "B 페이지", "B 페이지 컨투어 분석 결과가 표시됩니다."
         )
         image_row.addWidget(source_card, stretch=1)
         image_row.addWidget(result_card, stretch=1)
@@ -159,31 +152,9 @@ class MainWindow(QMainWindow):
         controls_layout.setContentsMargins(16, 14, 16, 14)
         controls_layout.setSpacing(10)
 
-        controls_title = QLabel("검출 결과")
+        controls_title = QLabel("컨투어 분석")
         controls_title.setObjectName("sectionTitle")
-        self.surface_checkbox = QCheckBox("표면 컨투어")
-        self.ball_checkbox = QCheckBox("볼 컨투어")
-        self.surface_checkbox.toggled.connect(self._on_detection_option_changed)
-        self.ball_checkbox.toggled.connect(self._on_detection_option_changed)
         controls_layout.addWidget(controls_title)
-        controls_layout.addWidget(self.surface_checkbox)
-        controls_layout.addWidget(self.ball_checkbox)
-
-        divider = QFrame()
-        divider.setFrameShape(QFrame.HLine)
-        divider.setObjectName("divider")
-        controls_layout.addWidget(divider)
-
-        self.surface_preview_label = self._create_contour_preview(
-            controls_layout,
-            "표면 컨투어",
-            "표면 검출 후 표시됩니다.",
-        )
-        self.ball_preview_label = self._create_contour_preview(
-            controls_layout,
-            "볼 컨투어",
-            "볼 검출 후 표시됩니다.",
-        )
         controls_layout.addStretch(1)
 
         self.import_btn = QPushButton("불러오기")
@@ -196,27 +167,6 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.detect_btn)
 
         return controls
-
-    def _create_contour_preview(self, parent_layout, title_text, empty_text):
-        preview_card = QFrame()
-        preview_card.setObjectName("contourPreviewCard")
-        preview_layout = QVBoxLayout(preview_card)
-        preview_layout.setContentsMargins(10, 10, 10, 10)
-        preview_layout.setSpacing(6)
-
-        title = QLabel(title_text)
-        title.setObjectName("contourPreviewTitle")
-        preview_layout.addWidget(title)
-
-        preview_label = QLabel(empty_text)
-        preview_label.setObjectName("contourPreview")
-        preview_label.setAlignment(Qt.AlignCenter)
-        preview_label.setWordWrap(True)
-        preview_label.setMinimumHeight(94)
-        preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        preview_layout.addWidget(preview_label)
-        parent_layout.addWidget(preview_card)
-        return preview_label
 
     def _create_image_label(self, message):
         label = QLabel(message)
@@ -232,7 +182,7 @@ class MainWindow(QMainWindow):
         dialog = QFileDialog(self, "이미지 불러오기", DEFAULT_DIR)
         dialog.setFileMode(QFileDialog.ExistingFiles)
         dialog.setOption(QFileDialog.DontUseNativeDialog, True)
-        dialog.setNameFilter("이미지 파일 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)")
+        dialog.setNameFilter("TIFF 이미지 (*.tif *.tiff)")
         dialog.setLabelText(QFileDialog.Accept, "선택")
 
         if dialog.exec_() != QFileDialog.Accepted:
@@ -281,11 +231,7 @@ class MainWindow(QMainWindow):
         self.prev_btn.setEnabled(self.current_index > 0)
         self.next_btn.setEnabled(self.current_index < len(self.image_paths) - 1)
 
-        if self._has_detection_option():
-            self._detect_current_image()
-        else:
-            self._clear_result("검출 옵션을 하나 이상 선택하세요.")
-            self._show_current_info()
+        self._detect_current_image()
 
     def on_detect(self):
         if not self.image_paths:
@@ -298,14 +244,7 @@ class MainWindow(QMainWindow):
         path = self.image_paths[self.current_index]
         started_at = perf_counter()
         try:
-            result_image, result = create_detection_visualization(
-                path,
-                detect_surface=self.surface_checkbox.isChecked(),
-                detect_balls=self.ball_checkbox.isChecked(),
-            )
-            surface_preview_image, ball_preview_image = (
-                create_contour_preview_visualizations(path, result)
-            )
+            result_image, result = create_detection_visualization(path)
         except ValueError as error:
             self._clear_result("검출에 실패했습니다.")
             QMessageBox.critical(self, "검출", str(error))
@@ -313,28 +252,12 @@ class MainWindow(QMainWindow):
 
         elapsed_seconds = perf_counter() - started_at
         images_per_second = 1 / max(elapsed_seconds, 0.000001)
-        self._show_result_image(
-            result_image,
-            result,
-            surface_preview_image,
-            ball_preview_image,
-        )
+        self._show_result_image(result_image)
         self._update_info_label(path, result, elapsed_seconds, images_per_second)
 
-    def _show_result_image(
-        self,
-        bgr_image,
-        result,
-        surface_preview_image,
-        ball_preview_image,
-    ):
+    def _show_result_image(self, bgr_image):
         self.result_pixmap = self._pixmap_from_bgr_image(bgr_image)
         self._set_scaled_pixmap(self.result_label, self.result_pixmap)
-        self._show_contour_previews(
-            result,
-            surface_preview_image,
-            ball_preview_image,
-        )
 
     @staticmethod
     def _pixmap_from_bgr_image(bgr_image):
@@ -344,28 +267,6 @@ class MainWindow(QMainWindow):
             bgr_image.tobytes(), width, height, width * 3, QImage.Format_BGR888
         )
         return QPixmap.fromImage(qimage.copy())
-
-    def _show_contour_previews(self, result, surface_preview_image, ball_preview_image):
-        if result.surface is None:
-            self._clear_surface_preview("표면을 검출하지 못했습니다.")
-        else:
-            self.surface_preview_pixmap = self._pixmap_from_bgr_image(
-                surface_preview_image
-            )
-            self._set_scaled_pixmap(
-                self.surface_preview_label,
-                self.surface_preview_pixmap,
-                preview_scale=0.85,
-            )
-
-        if not result.balls:
-            self._clear_ball_preview("볼을 검출하지 못했습니다.")
-            return
-
-        self.ball_preview_pixmap = self._pixmap_from_bgr_image(
-            ball_preview_image
-        )
-        self._set_scaled_pixmap(self.ball_preview_label, self.ball_preview_pixmap)
 
     @staticmethod
     def _set_scaled_pixmap(label, pixmap, preview_scale=1.0):
@@ -377,34 +278,10 @@ class MainWindow(QMainWindow):
             pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         )
 
-    def _has_detection_option(self):
-        return self.surface_checkbox.isChecked() or self.ball_checkbox.isChecked()
-
-    def _on_detection_option_changed(self):
-        self._update_detect_button_state()
-        if not self._has_detection_option():
-            self._clear_result("검출 옵션을 하나 이상 선택하세요.")
-
-    def _update_detect_button_state(self):
-        self.detect_btn.setEnabled(self._has_detection_option())
-
     def _clear_result(self, message):
         self.result_pixmap = QPixmap()
         self.result_label.setPixmap(QPixmap())
         self.result_label.setText(message)
-        self._clear_surface_preview("표면 검출 후 표시됩니다.")
-        self._clear_ball_preview("볼 검출 후 표시됩니다.")
-
-    # 
-    def _clear_surface_preview(self, message):
-        self.surface_preview_pixmap = QPixmap()
-        self.surface_preview_label.setPixmap(QPixmap())
-        self.surface_preview_label.setText(message)
-
-    def _clear_ball_preview(self, message):
-        self.ball_preview_pixmap = QPixmap()
-        self.ball_preview_label.setPixmap(QPixmap())
-        self.ball_preview_label.setText(message)
 
     def _update_info_label(
         self, path, result=None, elapsed_seconds=None, images_per_second=None
@@ -414,32 +291,27 @@ class MainWindow(QMainWindow):
             f"2. 이미지 크기  {self.original_pixmap.width()} × {self.original_pixmap.height()} px",
         ]
         if result is not None:
-            lines.append(f"3. 볼 검출 개수 : {len(result.balls)}개")
+            lines.append(f"3. B 페이지 외곽 컨투어 개수 : {len(result.contours)}개")
+            point_count = sum(
+                len(measurement.top_points)
+                + len(measurement.bottom_points)
+                + len(measurement.left_points)
+                + len(measurement.right_points)
+                for measurement in result.measurements
+            )
+            lines.append(f"4. 4면 첫 접점 개수 : {point_count}개")
             if elapsed_seconds is not None and images_per_second is not None:
                 lines.append(
-                    f"4. 처리 시간  {elapsed_seconds * 1000:.1f} ms · "
+                    f"5. 처리 시간  {elapsed_seconds * 1000:.1f} ms · "
                     f"{images_per_second:.2f} image/sec"
                 )
         self.info_label.setText("\n".join(lines))
-
-    def _show_current_info(self):
-        path = self.image_paths[self.current_index]
-        self._update_info_label(path)
 
     def _refresh_scaled_pixmaps(self):
         if not self.original_pixmap.isNull():
             self._set_scaled_pixmap(self.image_label, self.original_pixmap)
         if not self.result_pixmap.isNull():
             self._set_scaled_pixmap(self.result_label, self.result_pixmap)
-        if not self.surface_preview_pixmap.isNull():
-            self._set_scaled_pixmap(
-                self.surface_preview_label,
-                self.surface_preview_pixmap,
-                preview_scale=0.85,
-            )
-        if not self.ball_preview_pixmap.isNull():
-            self._set_scaled_pixmap(self.ball_preview_label, self.ball_preview_pixmap)
-
     def showEvent(self, event):
         super().showEvent(event)
         self._refresh_scaled_pixmaps()

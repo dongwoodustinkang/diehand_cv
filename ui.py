@@ -39,6 +39,7 @@ class MainWindow(QMainWindow):
         self.current_index = -1
         self.original_pixmap = QPixmap() # 원본 이미지
         self.result_pixmap = QPixmap() # B 페이지 이미지
+        self.crop_preview_pixmap = QPixmap()
         self._build_ui()
 
     def _build_ui(self):
@@ -155,6 +156,7 @@ class MainWindow(QMainWindow):
         controls_title = QLabel("컨투어 분석")
         controls_title.setObjectName("sectionTitle")
         controls_layout.addWidget(controls_title)
+        self.crop_preview_label = self._create_crop_preview(controls_layout)
         controls_layout.addStretch(1)
 
         self.import_btn = QPushButton("불러오기")
@@ -167,6 +169,27 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.detect_btn)
 
         return controls
+
+    def _create_crop_preview(self, parent_layout):
+        preview_card = QFrame()
+        preview_card.setObjectName("imageCard")
+        preview_layout = QVBoxLayout(preview_card)
+        preview_layout.setContentsMargins(10, 10, 10, 10)
+        preview_layout.setSpacing(6)
+
+        title = QLabel("선 내부 Crop")
+        title.setObjectName("cardTitle")
+        preview_layout.addWidget(title)
+
+        preview_label = QLabel("컨투어 분석 후 표시됩니다.")
+        preview_label.setObjectName("imagePreview")
+        preview_label.setAlignment(Qt.AlignCenter)
+        preview_label.setWordWrap(True)
+        preview_label.setMinimumHeight(180)
+        preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        preview_layout.addWidget(preview_label)
+        parent_layout.addWidget(preview_card)
+        return preview_label
 
     def _create_image_label(self, message):
         label = QLabel(message)
@@ -253,11 +276,22 @@ class MainWindow(QMainWindow):
         elapsed_seconds = perf_counter() - started_at
         images_per_second = 1 / max(elapsed_seconds, 0.000001)
         self._show_result_image(result_image)
+        self._show_crop_preview(result.crop_preview)
         self._update_info_label(path, result, elapsed_seconds, images_per_second)
 
     def _show_result_image(self, bgr_image):
         self.result_pixmap = self._pixmap_from_bgr_image(bgr_image)
         self._set_scaled_pixmap(self.result_label, self.result_pixmap)
+
+    def _show_crop_preview(self, bgr_image):
+        if bgr_image is None or bgr_image.size == 0:
+            self.crop_preview_pixmap = QPixmap()
+            self.crop_preview_label.setPixmap(QPixmap())
+            self.crop_preview_label.setText("사각형 Crop 영역이 없습니다.")
+            return
+
+        self.crop_preview_pixmap = self._pixmap_from_bgr_image(bgr_image)
+        self._set_scaled_pixmap(self.crop_preview_label, self.crop_preview_pixmap)
 
     @staticmethod
     def _pixmap_from_bgr_image(bgr_image):
@@ -282,6 +316,9 @@ class MainWindow(QMainWindow):
         self.result_pixmap = QPixmap()
         self.result_label.setPixmap(QPixmap())
         self.result_label.setText(message)
+        self.crop_preview_pixmap = QPixmap()
+        self.crop_preview_label.setPixmap(QPixmap())
+        self.crop_preview_label.setText("컨투어 분석 후 표시됩니다.")
 
     def _update_info_label(
         self, path, result=None, elapsed_seconds=None, images_per_second=None
@@ -312,6 +349,8 @@ class MainWindow(QMainWindow):
             self._set_scaled_pixmap(self.image_label, self.original_pixmap)
         if not self.result_pixmap.isNull():
             self._set_scaled_pixmap(self.result_label, self.result_pixmap)
+        if not self.crop_preview_pixmap.isNull():
+            self._set_scaled_pixmap(self.crop_preview_label, self.crop_preview_pixmap)
     def showEvent(self, event):
         super().showEvent(event)
         self._refresh_scaled_pixmaps()

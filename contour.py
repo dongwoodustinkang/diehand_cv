@@ -17,6 +17,8 @@ POINT_RADIUS = 2
 EXTREME_POINT_RADIUS = 4
 SECONDARY_POINT_RADIUS = 4
 LINE_THICKNESS = 1        # 확장 직선 두께
+EXTREME_SENCODARY_DIFF = 2
+MIN_DISTANCE = 50
 
 CONTOUR_COLOR = (0, 255, 0)
 TOP_COLOR = (255, 0, 0)
@@ -137,7 +139,7 @@ def find_first_contact_points(contour, image_shape):
     right_extreme = tuple(pts[right_idx])
 
     # 3. 보조 극단점 추출 로직 (정도 차이 3px 이내, 50px 이상 떨어진 점)
-    def find_secondary_point(candidates_mask, extreme_pt, min_distance=50):
+    def find_secondary_point(candidates_mask, extreme_pt, min_distance=MIN_DISTANCE):
         candidate_indices = np.where(candidates_mask)[0]
         valid_pts = []
         for idx in candidate_indices:
@@ -156,10 +158,12 @@ def find_first_contact_points(contour, image_shape):
         valid_pts.sort(key=lambda x: x[0], reverse=True)
         return valid_pts[0][1]
 
-    top_secondary = find_secondary_point(pts[:, 1] <= pts[top_idx, 1] + 3, top_extreme, min_distance=50)
-    bottom_secondary = find_secondary_point(pts[:, 1] >= pts[bottom_idx, 1] - 3, bottom_extreme, min_distance=50)
-    left_secondary = find_secondary_point(pts[:, 0] <= pts[left_idx, 0] + 3, left_extreme, min_distance=50)
-    right_secondary = find_secondary_point(pts[:, 0] >= pts[right_idx, 0] - 3, right_extreme, min_distance=50)
+
+    # PIXEL 정도 차이
+    top_secondary = find_secondary_point(pts[:, 1] <= pts[top_idx, 1] + EXTREME_SENCODARY_DIFF, top_extreme, min_distance=MIN_DISTANCE)
+    bottom_secondary = find_secondary_point(pts[:, 1] >= pts[bottom_idx, 1] - EXTREME_SENCODARY_DIFF, bottom_extreme, min_distance=MIN_DISTANCE)
+    left_secondary = find_secondary_point(pts[:, 0] <= pts[left_idx, 0] + EXTREME_SENCODARY_DIFF, left_extreme, min_distance=MIN_DISTANCE)
+    right_secondary = find_secondary_point(pts[:, 0] >= pts[right_idx, 0] - EXTREME_SENCODARY_DIFF, right_extreme, min_distance=MIN_DISTANCE)
 
     return ContourMeasurement(
         bounding_rect=(x, y, width, height),

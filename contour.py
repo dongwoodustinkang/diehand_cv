@@ -1,441 +1,377 @@
-
 from dataclasses import dataclass, field
-from typing import Optional, List
-from pathlib import Path
+from typing import List, Optional, Tuple
+
 import cv2
 import numpy as np
 
-# ------------ Data Class ----------- #
+# 검출할 컨투어의 최소/최대 크기
+MIN_CONTOUR_AREA = 4000 
+MAX_CONTOUR_AREA = 10000
+
+# 샘플링 개수 설정
+TOP_BOTTOM_SAMPLE_COUNT = 15
+LEFT_RIGHT_SAMPLE_COUNT = 5
+
+# 점(원)의 크기 조절
+POINT_RADIUS = 2
+EXTREME_POINT_RADIUS = 4
+SECONDARY_POINT_RADIUS = 4
+LINE_THICKNESS = 1        # 확장 직선 두께
+EXTREME_SENCODARY_DIFF = 2
+MIN_DISTANCE = 30
+CROP_RECTANGLE_COLOR = (255, 255, 0)
+CROP_RECTANGLE_THICKNESS = 1
+
+CONTOUR_COLOR = (0, 255, 0)
+TOP_COLOR = (255, 0, 0)
+BOTTOM_COLOR = (0, 0, 255)
+LEFT_COLOR = (255, 0, 255)
+RIGHT_COLOR = (0, 255, 255)
+
+# 시각화 색상 설정
+EXTREME_POINT_COLOR = (0, 255, 255)         # 절대 극단점 (노란색)
+SECONDARY_POINT_COLOR = (0, 165, 255)       # 보조 극단점 (주황색)
+
+
 @dataclass
-class SurfaceDetection:
-    x: int
-    y: int
-    width: int
-    height: int
-    
-@dataclass
-class BallDetection:
-    x: int
-    y: int
-    radius: int
+class ContourMeasurement:
+    """컨투어 하나의 4면 첫 접점, 절대 극단점 및 보조 극단점 정보."""
+
+    bounding_rect: Tuple[int, int, int, int]
+    top_points: List[Tuple[int, int]]
+    bottom_points: List[Tuple[int, int]]
+    left_points: List[Tuple[int, int]]
+    right_points: List[Tuple[int, int]]
+
+    # 1. 절대 극단점 (4개)
+    top_extreme: Tuple[int, int] = None
+    bottom_extreme: Tuple[int, int] = None
+    left_extreme: Tuple[int, int] = None
+    right_extreme: Tuple[int, int] = None
+
+    # 2. 보조 극단점 (3px 이내, 50px 이상 떨어진 점, 4개)
+    top_secondary: Tuple[int, int] = None
+    bottom_secondary: Tuple[int, int] = None
+    left_secondary: Tuple[int, int] = None
+    right_secondary: Tuple[int, int] = None
+
 
 @dataclass
 class DetectionResult:
-    surface: Optional[SurfaceDetection] = None # 표면이 감지된 결과 정보
-    balls: List[BallDetection] = field(default_factory=list) # 감지된 공들의 리스트
+    """B 페이지 컨투어 분석 결과."""
+
+    contours: List[np.ndarray] = field(default_factory=list)
+    measurements: List[ContourMeasurement] = field(default_factory=list)
+    crop_preview: Optional[np.ndarray] = None
 
 
-
-# ------------ Data Class ----------- #
-
-SURFACE_COLOR = (80, 255, 80) # GREEN(BGR)
-BALL_COLOR = (0, 0, 255) # RED(BGR)
-LINE_THICKNESS = 1 # 두께
-SURFACE_ROI_PADDING_RATIO = 0.02 # 1차 컨투어 후 여유공간 비율
-SURFACE_MAX_BRIGHTNESS = 235
-SURFACE_MIN_BRIGHTNESS = 110
-SURFACE_OTSU_MARGIN = 30
-SURFACE_BALL_GAP = 2 # 볼과 표면간의 간경 (y좌표)
-LEFT_ZONE_MAX = 0.35
-RIGHT_ZONE_MIN = 0.65
+def to_grayscale(image):
+    """이미지를 그레이스케일로 변환한다."""
+    if image.ndim == 2:
+        return image.copy()
+    if image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
+    return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
 
+def find_b_contours(image_b):
+    """그레이 스케일, 이진화, 컨투어링 작업."""
+    gray = to_grayscale(image_b) # 그레이스케일
+    _, thresh = cv2.threshold(gray,0,255,cv2.THRESH_BINARY + cv2.THRESH_OTSU,) # 이진화
+    contours, _ = cv2.findContours(thresh,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE,) # 컨투어링 작업
 
-def contour_visualization(image_path: Path, detect_surface=True, detect_balls=True):
-    gray_image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE) # 그레이 스케일(ndarray)
-    if gray_image is None:
-        raise ValueError(f"이미지를 읽을 수 없습니다: {image_path}")
-    detected_image = detect_shapes(gray_image, detect_surface, detect_balls)
-    return draw_detections(gray_image, detected_image), detected_image
+    # 범위내 컨투어 검출
+    filtered_contours = [
+        con for con in contours
+        if MIN_CONTOUR_AREA <= cv2.contourArea(con) <= MAX_CONTOUR_AREA
+    ]
 
-def create_detection_visualization(
-    image_path: Path,
-    detect_surface=True,
-    detect_balls=True,
-):
-    """app.py가 호출하는 Surface/Ball 컨투어 검출 함수."""
-    return contour_visualization(
-        image_path,
-        detect_surface=detect_surface,
-        detect_balls=detect_balls,
-    )
+    return DetectionResult(contours=filtered_contours)
 
 
-def create_contour_preview_visualizations(image_path, result: DetectionResult):
-    """### 컨투어 내부 표면 및 볼의 이미지 프리뷰
-    - 이미지, DetectionResult를 인자로 받음
-    - 표면과 공 프리뷰 이미지를 반환함
+def find_first_contact_points(contour, image_shape):
     """
+    ## 컨투어의 상하좌우 접점 찾기
+    1. 컨투어를 그린다.
+    2. 상하단 15개, 좌우측 5개로 포인트를 샘플링한다. (중복점 제거 안 함)
+    3. 각 포인트에 대해 가장 가까운 절대 극단점(4개)을 찾는다.  
     
-    # 이미지를 흑백 사진으로 불러옴
-    gray_image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
-    if gray_image is None:
-        raise ValueError(f"이미지를 읽을 수 없습니다: {image_path}")
-
-    # 흑백 이미지를 컬러 이미지로 변경
-    original_bgr = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
-    # 흑백 이미지에 공의 위치를 그려주는 함수
-    balls_only = draw_detections(
-        gray_image,
-        DetectionResult(balls=result.balls), # 공 정보
-    )
-
-    # 표면 프리뷰 이미지 생성
-    surface_preview = (
-        _crop_surface_preview(original_bgr, result.surface)
-        if result.surface is not None else None
-    )
-
-    # 공 프리뷰 이미지 생성
-    balls_preview = (
-        _crop_balls_preview(balls_only, result.balls)
-        if result.balls else None
-    )
-    return surface_preview, balls_preview
-
-
-
-def _crop_surface_preview(image: np.ndarray, surface: SurfaceDetection):
-    """### 표면 Crop 함수
-    - 이미지, 표면 정보를 인자로 받음
-    - 표면 컨투어링 부분을 Crop한 이미지 반환
     """
-    left = max(0, surface.x) # 시작 x좌표가 0보다 커야함
-    top = max(0, surface.y) # 시작 y좌표가 0보다 커야함
-    right = min(image.shape[1], surface.x + surface.width) # 끝 x좌표가 이미지 너비보다 클 수 없음
-    bottom = min(image.shape[0], surface.y + surface.height) # 끝 y좌표가 이미지 높이보다 클 수 없음
-    return image[top:bottom, left:right].copy()
+
+    image_height, image_width = image_shape
+    x, y, width, height = cv2.boundingRect(contour) # 컨투어의 x,y, width, height를 구함
+
+    mask = np.zeros((image_height, image_width), dtype=np.uint8)
+    cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED) # 그대로 컨투어 그리기
+
+    # 1. 샘플링 로직 (상·하단 15개, 좌·우측 5개)
+    top_points = []
+    bottom_points = []
+    x_positions = np.linspace(x, x + width - 1, TOP_BOTTOM_SAMPLE_COUNT, dtype=int)
+    for point_x in x_positions:
+        y_positions = np.where(mask[:, point_x] == 255)[0]
+        if len(y_positions) == 0:
+            continue
+
+        top_points.append((int(point_x), int(y_positions[0])))
+        bottom_points.append((int(point_x), int(y_positions[-1])))
+
+    left_points = []
+    right_points = []
+    y_positions = np.linspace(y, y + height - 1, LEFT_RIGHT_SAMPLE_COUNT, dtype=int)
+    for point_y in y_positions:
+        x_positions = np.where(mask[point_y, :] == 255)[0]
+        if len(x_positions) == 0:
+            continue
+
+        left_points.append((int(x_positions[0]), int(point_y)))
+        right_points.append((int(x_positions[-1]), int(point_y)))
+
+    # 2. 절대 극단점 추출 로직 (기존 4개)
+    pts = contour[:, 0, :]  # (N, 2) 형태의 좌표 배열
+
+    top_idx = pts[:, 1].argmin()
+    bottom_idx = pts[:, 1].argmax()
+    left_idx = pts[:, 0].argmin()
+    right_idx = pts[:, 0].argmax()
+
+    top_extreme = tuple(pts[top_idx])
+    bottom_extreme = tuple(pts[bottom_idx])
+    left_extreme = tuple(pts[left_idx])
+    right_extreme = tuple(pts[right_idx])
+
+    # 3. 보조 극단점 추출 로직 (정도 차이 3px 이내, 50px 이상 떨어진 점)
+    def find_secondary_point(candidates_mask, extreme_pt, min_distance=MIN_DISTANCE):
+        candidate_indices = np.where(candidates_mask)[0]
+        valid_pts = []
+        for idx in candidate_indices:
+            pt = pts[idx]
+            dist = np.linalg.norm(pt - np.array(extreme_pt))
+            if dist >= min_distance:
+                valid_pts.append((dist, tuple(pt)))
+
+        if not valid_pts:
+            if len(candidate_indices) > 0:
+                dists = [np.linalg.norm(pts[i] - np.array(extreme_pt)) for i in candidate_indices]
+                max_i = np.argmax(dists)
+                return tuple(pts[candidate_indices[max_i]])
+            return None
+
+        valid_pts.sort(key=lambda x: x[0], reverse=True)
+        return valid_pts[0][1]
 
 
-def _crop_balls_preview(image: np.ndarray, balls: List[BallDetection]):
-    """### 볼 Crop 함수
-    - 이미지, 볼 정보를 인자로 받음
-    - 볼 컨투어링 부분을 Crop한 이미지 반환
-    """
-    # 기본 설정
-    preview_padding = LINE_THICKNESS + 3 # 테두리 바깥쪽 여유 공간
-    background_color = (251, 250, 249)  # #F9FAFB in BGR
-    ball_previews = [] # 잘라낸 볼들을 모아둘 빈 리스트
+    # PIXEL 정도 차이
+    top_secondary = find_secondary_point(pts[:, 1] <= pts[top_idx, 1] + EXTREME_SENCODARY_DIFF, top_extreme, min_distance=MIN_DISTANCE)
+    bottom_secondary = find_secondary_point(pts[:, 1] >= pts[bottom_idx, 1] - EXTREME_SENCODARY_DIFF, bottom_extreme, min_distance=MIN_DISTANCE)
+    left_secondary = find_secondary_point(pts[:, 0] <= pts[left_idx, 0] + EXTREME_SENCODARY_DIFF, left_extreme, min_distance=MIN_DISTANCE)
+    right_secondary = find_secondary_point(pts[:, 0] >= pts[right_idx, 0] - EXTREME_SENCODARY_DIFF, right_extreme, min_distance=MIN_DISTANCE)
 
-    for ball in sorted(balls, key=lambda item: item.x):
-        # 공 하나씩 잘라내고 배경 정리
-        left = max(0, ball.x - ball.radius - preview_padding)
-        top = max(0, ball.y - ball.radius - preview_padding)
-        right = min(image.shape[1], ball.x + ball.radius + preview_padding + 1)
-        bottom = min(image.shape[0], ball.y + ball.radius + preview_padding + 1)
-        cropped = image[top:bottom, left:right] # ROI 영역만 사각형으로 1차 잘라냄
-
-        # 마스크 영역 생성
-        mask = np.zeros(cropped.shape[:2], dtype=np.uint8)
-        cv2.circle(
-            mask,
-            (ball.x - left, ball.y - top),
-            ball.radius + LINE_THICKNESS,
-            255,
-            -1,
-        )
-        
-        ball_preview = np.empty_like(cropped)
-        ball_preview[:] = background_color
-        ball_preview[mask > 0] = cropped[mask > 0]
-        ball_previews.append(ball_preview)
-
-    # 공 나란히 이어 붙이기
-    gap = max(8, round(max(ball.radius for ball in balls) * 0.75))
-    preview_height = max(preview.shape[0] for preview in ball_previews)
-    preview_width = sum(preview.shape[1] for preview in ball_previews) + gap * (
-        len(ball_previews) - 1
+    return ContourMeasurement(
+        bounding_rect=(x, y, width, height),
+        top_points=top_points,
+        bottom_points=bottom_points,
+        left_points=left_points,
+        right_points=right_points,
+        top_extreme=top_extreme,
+        bottom_extreme=bottom_extreme,
+        left_extreme=left_extreme,
+        right_extreme=right_extreme,
+        top_secondary=top_secondary,
+        bottom_secondary=bottom_secondary,
+        left_secondary=left_secondary,
+        right_secondary=right_secondary,
     )
-    preview = np.empty((preview_height, preview_width, 3), dtype=image.dtype)
-    preview[:] = background_color
 
-    offset_x = 0
-    for ball_preview in ball_previews:
-        offset_y = (preview_height - ball_preview.shape[0]) // 2
-        preview[
-            offset_y : offset_y + ball_preview.shape[0],
-            offset_x : offset_x + ball_preview.shape[1],
-        ] = ball_preview
-        offset_x += ball_preview.shape[1] + gap
+
+def draw_extended_line(img, pt1, pt2, color, thickness=1):
+    """두 점을 지나는 직선을 이미지 경계(끝)까지 연장하여 그린다."""
+    if pt1 is None or pt2 is None:
+        return
+
+    h, w = img.shape[:2]
+    x1, y1 = pt1
+    x2, y2 = pt2
+
+    if x1 == x2 and y1 == y2:
+        return
+
+    dx = x2 - x1
+    dy = y2 - y1
+
+    t_values = []
+    if dx != 0:
+        t_values.append((0 - x1) / dx)
+        t_values.append(((w - 1) - x1) / dx)
+    if dy != 0:
+        t_values.append((0 - y1) / dy)
+        t_values.append(((h - 1) - y1) / dy)
+
+    if not t_values:
+        return
+
+    valid_points = []
+    for t in t_values:
+        x = x1 + t * dx
+        y = y1 + t * dy
+        if -0.5 <= x <= w - 0.5 and -0.5 <= y <= h - 0.5:
+            cx = int(np.clip(round(x), 0, w - 1))
+            cy = int(np.clip(round(y), 0, h - 1))
+            valid_points.append((cx, cy))
+
+    unique_pts = []
+    for p in valid_points:
+        if p not in unique_pts:
+            unique_pts.append(p)
+
+    if len(unique_pts) >= 2:
+        max_dist = 0
+        p_a, p_b = unique_pts[0], unique_pts[1]
+        for i in range(len(unique_pts)):
+            for j in range(i + 1, len(unique_pts)):
+                dist = (unique_pts[i][0] - unique_pts[j][0])**2 + (unique_pts[i][1] - unique_pts[j][1])**2
+                if dist > max_dist:
+                    max_dist = dist
+                    p_a = unique_pts[i]
+                    p_b = unique_pts[j]
+        cv2.line(img, p_a, p_b, color, thickness)
+
+
+def get_crop_rectangle(measurement, image_shape):
+    """하늘색 사각형과 Crop에 공통으로 사용할 좌표를 반환한다."""
+
+    image_height, image_width = image_shape
+    left = max(0, measurement.left_extreme[0])
+    top = max(0, measurement.top_extreme[1])
+    right = min(image_width - 1, measurement.right_extreme[0])
+    bottom = min(image_height - 1, measurement.bottom_extreme[1])
+
+    if left >= right or top >= bottom:
+        return None
+
+    return left, top, right, bottom
+
+
+def crop_inside_rectangle(image_b, measurement):
+    """하늘색 사각형 내부만 B 페이지에서 Crop한다."""
+
+    crop_rectangle = get_crop_rectangle(measurement, image_b.shape[:2])
+    if crop_rectangle is None:
+        return None
+
+    left, top, right, bottom = crop_rectangle
+    cropped_image = to_grayscale(image_b)[top : bottom + 1, left : right + 1]
+    cropped_image = cv2.cvtColor(cropped_image, cv2.COLOR_GRAY2BGR)
+    cv2.rectangle(
+        cropped_image,
+        (0, 0),
+        (cropped_image.shape[1] - 1, cropped_image.shape[0] - 1),
+        (0, 0, 0),
+        1,
+    )
+    return cropped_image
+
+
+def create_crop_preview(image_b, measurements):
+    """하늘색 사각형 Crop 이미지를 사이드바 미리보기로 반환한다."""
+
+    crops = []
+    for measurement in measurements:
+        cropped_image = crop_inside_rectangle(image_b, measurement)
+        if cropped_image is not None and cropped_image.size > 0:
+            crops.append(cropped_image)
+
+    if not crops:
+        return None
+    if len(crops) == 1:
+        return crops[0]
+
+    gap = 8
+    preview_width = max(crop.shape[1] for crop in crops)
+    preview_height = sum(crop.shape[0] for crop in crops) + gap * (len(crops) - 1)
+    preview = np.full((preview_height, preview_width, 3), 249, dtype=np.uint8)
+
+    offset_y = 0
+    for crop in crops:
+        crop_height, crop_width = crop.shape[:2]
+        offset_x = (preview_width - crop_width) // 2
+        preview[offset_y : offset_y + crop_height, offset_x : offset_x + crop_width] = crop
+        offset_y += crop_height + gap
+
     return preview
 
 
-def draw_detections(gray: np.ndarray, result:DetectionResult):
-    """이미지에 컨투어 라인을 그리는 함수"""
-    visualized = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+def create_detection_visualization(image_path):
+    """B 페이지 컨투어, 샘플 접점, 극단점, 보조점 및 연장된 직선 이미지를 만든다."""
 
-    # Surface
-    if result.surface is not None:
-        surface = result.surface
-        cv2.rectangle(
-            visualized,
-            (surface.x, surface.y),
-            (surface.x + surface.width, surface.y + surface.height),
-            SURFACE_COLOR,
-            LINE_THICKNESS, # 두께
-        )
-    
-    for i, ball in enumerate(result.balls, start=1):
-        cv2.circle(
-            visualized,
-            (ball.x, ball.y),
-            ball.radius,
-            BALL_COLOR,
-            LINE_THICKNESS, # 굵기
-        )
-    return visualized
+    success, images = cv2.imreadmulti(str(image_path), flags=cv2.IMREAD_UNCHANGED)
+    if not success or len(images) < 2:
+        raise ValueError(f"A/B 두 페이지 TIFF를 읽을 수 없습니다: {image_path}")
 
-def detect_shapes(gray: np.ndarray, detect_surface=True, detect_balls=True):
-    """### 도형을 탐지하는 함수
-    - 원을 탐지하려면 사각형 표면을 먼저 탐지해야함.
-    - 그래서 원만 탐지하려면 탐지 코드를 작동하되 결과에서는 출력하지 않음.
-    """
+    image_b = images[1]
+    gray = to_grayscale(image_b) # 이미지 파일 그레이 스케일 
+    result = find_b_contours(image_b) # 컨투어링 작업
 
-    # Detecting을 하지 않는 상태
-    if not detect_surface and not detect_balls:
-        return DetectionResult(surface=None, balls=[])
+    for contour in result.contours:
+        # 컨투어에 가장 먼저 닿는 접점 찾기
+        measurement = find_first_contact_points(contour, gray.shape)
+        result.measurements.append(measurement)
 
-    base_surface = find_surface_contour(gray)
-    detected_balls = (
-        find_balls_contours(gray, base_surface)
-        if (detect_surface or detect_balls) and base_surface is not None else []
-    )
-    surface = (
-        find_bright_surface_contour(gray, base_surface, detected_balls)
-        if detect_surface and base_surface is not None else None
-    )
+    result.crop_preview = create_crop_preview(image_b, result.measurements) # 사이드바 프리뷰
+    result_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) # 그레이 스케일를 컬로로 변환하여 컨투어 색상이 보이게
+    cv2.drawContours(result_image, result.contours, -1, CONTOUR_COLOR, 1) # 컨투어 그리기 
 
-    balls = detected_balls if detect_balls else []
-    return DetectionResult(surface=surface, balls=balls)
+    for measurement in result.measurements:
+        # 1. 상·하·좌·우 두 점 연결 직선 그리기 (이미지 끝까지 연장)
+        draw_extended_line(result_image, measurement.top_extreme, measurement.top_secondary, TOP_COLOR, LINE_THICKNESS)
+        draw_extended_line(result_image, measurement.bottom_extreme, measurement.bottom_secondary, BOTTOM_COLOR, LINE_THICKNESS)
+        draw_extended_line(result_image, measurement.left_extreme, measurement.left_secondary, LEFT_COLOR, LINE_THICKNESS)
+        draw_extended_line(result_image, measurement.right_extreme, measurement.right_secondary, RIGHT_COLOR, LINE_THICKNESS)
 
-
-def select_balls_by_layout(
-    candidates, surface_left, surface_width):
-    """Ball 후보의 배치를 확인해 최종 검출 결과를 반환한다.
-
-    Ball이 0개면 빈 목록을, 1개면 해당 후보 하나를 그대로 반환한다.
-    2개 이상일 때는 기존의 좌·중앙·우 배치 규칙을 적용한다.
-    """
-    if len(candidates) <= 1:
-        return sorted(candidates, key=lambda ball: ball.x)
-
-    left_balls: List[BallDetection] = []
-    center_balls: List[BallDetection] = []
-    right_balls: List[BallDetection] = []
-
-    for ball in candidates:
-        relative_x = (ball.x - surface_left) / surface_width
-        if relative_x <= LEFT_ZONE_MAX:
-            left_balls.append(ball)
-        elif relative_x >= RIGHT_ZONE_MIN:
-            right_balls.append(ball)
-        else:
-            center_balls.append(ball)
-
-    # 볼이 두개인 경우
-    is_two_ball_layout = (
-        len(left_balls) == 1
-        and len(center_balls) == 0
-        and len(right_balls) == 1
-    )
-
-    # 볼이 세개인 경우
-    is_three_ball_layout = (
-        len(left_balls) == 1
-        and len(center_balls) == 1
-        and len(right_balls) == 1
-    )
-
-    if is_two_ball_layout or is_three_ball_layout:
-        return sorted(candidates, key=lambda ball: ball.x)
-    return []
-
-
-def crop_surface_roi(gray, surface, padding_ratio=SURFACE_ROI_PADDING_RATIO):
-    """1차 표면 박스에 여유공간 두어 ROI와 원본 기준 시작 좌표를 반환"""
-    height, width = gray.shape
-
-    pad_x = max(5, round(surface.width * padding_ratio))
-    pad_y = max(5, round(surface.height * padding_ratio))
-
-    roi_left = max(0, surface.x - pad_x)
-    roi_top = max(0, surface.y - pad_y)
-    roi_right = min(width, surface.x + surface.width + pad_x)
-    roi_bottom = min(height, surface.y + surface.height + pad_y)
-
-    roi = gray[roi_top:roi_bottom, roi_left:roi_right]
-    return roi, (roi_left, roi_top)
-
-
-def binarize_surface_roi(surface_roi):
-    """밝은 회색 패널을 흰색으로, 어두운 면과 크랙을 검정으로 분리"""
-    otsu_threshold, _ = cv2.threshold(
-        surface_roi,
-        0,
-        255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
-    )
-    min_brightness = min(max(0, round(otsu_threshold) - SURFACE_OTSU_MARGIN), SURFACE_MIN_BRIGHTNESS)
-    binary_roi = cv2.inRange(
-        surface_roi,
-        min_brightness,
-        SURFACE_MAX_BRIGHTNESS,
-    )
-    return binary_roi
-
-
-def keep_surface_above_balls(surface, balls):
-    """패널의 표면 하단이 볼의 상단보다 낮아지지 않게 조정"""
-    surface_bottom = surface.y + surface.height # 기존 표면 y 좌표
-    safe_bottom = surface_bottom # 수정될 표면 y좌표 
-
-    for ball in balls:
-        ball_top = ball.y - ball.radius # 볼의 상단
-        overlaps_vertically = ball_top <= surface_bottom and ball.y > surface.y # 볼이 패널 위에 있는지 확인
-
-        if overlaps_vertically:
-            safe_bottom = min(safe_bottom, ball_top - SURFACE_BALL_GAP) # 새로운 표면 하단 결정 (기존 표면 y 좌표, 볼보다 안전 갭 위쪽)
-
-    adjusted_height = safe_bottom - surface.y # 조정된 표면 y 좌표
-    minimum_height = max(1, round(surface.height * 0.25)) # 최소 높이
-
-    if adjusted_height < minimum_height:
-        return surface
-
-    return SurfaceDetection(surface.x, surface.y, surface.width, adjusted_height)
-
-
-def find_bright_surface_contour(gray, base_surface, balls=None):
-    """1차 표면 박스 안에서 밝은 회색 패널의 최종 컨투어 찾기."""
-    balls = balls or []
-
-    surface_roi, (roi_left, roi_top) = crop_surface_roi(gray, base_surface)
-    binary_roi = binarize_surface_roi(surface_roi) # 이진화
-
-    # 작은 크랙 때문에 패널이 끊어지지 않도록 약하게 연결한다.
-    crack_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
-    crack_filled = cv2.morphologyEx(binary_roi, cv2.MORPH_CLOSE, crack_kernel)
-
-    # 세로 방향으로 이어진 어두운 면·부품은 제거하고 넓은 패널만 남긴다.
-    roi_height, roi_width = surface_roi.shape
-    horizontal_kernel_width = max(3, round(roi_width * 0.333))
-    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(horizontal_kernel_width, 5),)
-    panel_mask = cv2.morphologyEx(crack_filled,cv2.MORPH_OPEN,horizontal_kernel)
-
-    contours, _ = cv2.findContours(panel_mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE) # 외곽 컨투어 추출
-    candidates = []
-
-    for contour in contours:
-
-        # ROI 내부(1차 컨투어) 기준 2차 컨투어 정보
-        local_x, local_y, box_width, box_height = cv2.boundingRect(contour)
-        aspect_ratio = box_width / max(box_height, 1)
-
-        # 후보군 필터링 조건
-        is_wide_enough = box_width >= roi_width * 0.55 # ROI 폭 55% 이상
-        is_tall_enough = box_height >= roi_height * 0.25 # ROI 높이 25% 이상
-        is_panel_like = aspect_ratio >= 2.5 # 가로세로비 2.5 이상
-
-        if is_wide_enough and is_tall_enough and is_panel_like:
-            candidate = SurfaceDetection(
-                roi_left + local_x,
-                roi_top + local_y,
-                box_width,
-                box_height,
+        crop_rectangle = get_crop_rectangle(measurement, gray.shape)
+        if crop_rectangle is not None:
+            left, top, right, bottom = crop_rectangle
+            cv2.rectangle(
+                result_image,
+                (left, top),
+                (right, bottom),
+                CROP_RECTANGLE_COLOR,
+                CROP_RECTANGLE_THICKNESS,
             )
-            candidate = keep_surface_above_balls(candidate, balls)
-            score = candidate.width * candidate.height
-            candidates.append((score, candidate))
 
-    if not candidates: # 후보군이 없다면 1차 컨투어를 반환
-        return keep_surface_above_balls(base_surface, balls)
+        # 2. 샘플 점들 그리기
+        point_groups = [
+            (measurement.top_points, TOP_COLOR),
+            (measurement.bottom_points, BOTTOM_COLOR),
+            (measurement.left_points, LEFT_COLOR),
+            (measurement.right_points, RIGHT_COLOR),
+        ]
+        for points, color in point_groups:
+            for point in points:
+                cv2.circle(result_image, point, POINT_RADIUS, color, thickness=cv2.FILLED)
 
-    _, surface = max(candidates, key=lambda item: item[0])
-    return surface
+        # 3. 절대 극단점 그리기 (노란색)
+        extreme_points = [
+            measurement.top_extreme,
+            measurement.bottom_extreme,
+            measurement.left_extreme,
+            measurement.right_extreme,
+        ]
+        for ex_point in extreme_points:
+            if ex_point is not None:
+                cv2.circle(result_image, ex_point, EXTREME_POINT_RADIUS, EXTREME_POINT_COLOR, thickness=cv2.FILLED)
+                cv2.circle(result_image, ex_point, EXTREME_POINT_RADIUS + 1, (0, 0, 0), thickness=1)
 
+        # 4. 보조 극단점 그리기 (주황색)
+        secondary_points = [
+            measurement.top_secondary,
+            measurement.bottom_secondary,
+            measurement.left_secondary,
+            measurement.right_secondary,
+        ]
+        for sec_point in secondary_points:
+            if sec_point is not None:
+                cv2.circle(result_image, sec_point, SECONDARY_POINT_RADIUS, SECONDARY_POINT_COLOR, thickness=cv2.FILLED)
+                cv2.circle(result_image, sec_point, SECONDARY_POINT_RADIUS + 1, (0, 0, 0), thickness=1)
 
-def find_surface_contour(gray: np.ndarray):
-    """### 사각형 표면을 탐지하는 함수 
-    1. 마스크 생성 (밝기 235 이상 -> 검정, 235 미만 -> 흰색)
-    2. 모폴로지 opening 연산으로 노이즈 제거 및 표면만 남기기
-    3. 바깥 윤곽선만 찾음
-    4. 후보군 필터링
-    5. 가장 큰 박스를 표면으로 선택
-    """
-    height, width = gray.shape
-    _, mask = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY_INV) # 마스크 생성  (밝기 235 이상 -> 검정, 235 미만 -> 흰색)
-
-    # 마스크 구조 작업
-    horizontal_kernel_width = max(3,round(width * 0.333)) # 전체 이미지의 33.3% 크기의 가로 (최소 3픽셀 이상)
-    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (horizontal_kernel_width,5)) # 가로 세로(3px) 크기의 커널을 남김  (직사각형, (크기))
-    surface_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, horizontal_kernel) # 모폴로지 opening 연산으로 노이즈 제거 및 표면만 남기기
-
-    # 정리된 마스크에서 윤곽선 찾고 후보군 필터링
-    contours, _ = cv2.findContours(surface_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) # 바깥 윤곽선만 찾음
-    candidates: list[tuple[float, tuple[int, int, int, int]]] = []
-
-    for contour in contours:
-        x, y, box_width, box_height = cv2.boundingRect(contour)
-        aspect_ratio = box_width / max(box_height, 1)
-
-        is_wide_enough = box_width >= width * 0.3 # 박스 너비가 이미지 전체 너비의 30% 이상인지
-        is_lower_part = y >= height * 0.25 # y좌표가 이미지 전체 높이의 25% 지점보다 아래인지?
-        is_surface_like = aspect_ratio >= 2.5 # 가로가 세로보다 2.5배 이상인지
-
-        if is_wide_enough and is_lower_part and is_surface_like:
-            # 3가지 조건 모두 만족하면 박스의 너비를 점수로 산정해 후보 목록에 담는다.
-            score = box_width * box_height
-            candidates.append((score, (x, y, box_width, box_height)))
-
-    if not candidates:
-        return None
-
-    _, (x, y, box_width, box_height) = max(candidates, key=lambda item: item[0]) # 면적이 가장 큰 박스를 택해 반환
-    return SurfaceDetection(x, y, box_width, box_height)
-
-
-def find_balls_contours(gray: np.ndarray, surface: SurfaceDetection):
-    """### 볼의 위치를 탐지해내는 함수
-    1. Surface의 Contour를 찾아냄
-    2. ROI(관심영역) 추출
-    3. 블러링으로 노이즈 제거
-    4. 허프 변환으로 원 탐지
-    5. 볼들의 위치 반환
-    
-    """
-    image_height, _ = gray.shape
-    x, y, surface_width, surface_height = surface.x, surface.y, surface.width, surface.height
-    
-    # ROI 설정 (y + surface_height : 직사각형 표면 아래 영역)
-    roi_top = max(0, y + surface_height - round(image_height * 0.03)) #12px (400 x 0.03), 즉 surface_bottom 보다 12px 위에서 부터 시작
-    roi_bottom = min(image_height, y + surface_height + round(image_height * 0.08)) #32px (400 x 0.08), 즉 surface_bottom 보다 32px 아래로
-    cropped_roi = gray[roi_top:roi_bottom, x : x + surface_width] # 볼 위치 부분만 잘라냄
-    blurred_roi = cv2.GaussianBlur(cropped_roi, (5, 5), 0) # 5x5 크기의 가우시안 필터로 노이즈 제거해서 큰 흰색 표면의 굴곡이 윤곽선으로 잡히는 것을 방지함
-
-    # 허프 변환을 이용한 원탐지
-    detected_circles = cv2.HoughCircles(
-        blurred_roi, # 볼이 있는 이미지 부분
-        cv2.HOUGH_GRADIENT,
-        dp = 1.0, # 내부 해상도
-        minDist = round(surface_width * 0.16), # 원의 중심과 최소거리
-        param1 = 50, # 약한 테두리 무시되는 정도 (높을수록 확실한 테두리만 탐지)
-        param2 = 12, # 원이라고 판단할 최소한의 점수 (낮을수록 원 탐지에 관대해짐)
-        minRadius = max(4, round(image_height * 0.01)), # 허용 최소 반지름
-        maxRadius = round(image_height * 0.04), # 하용 최대 반지름
-    )
-
-    if detected_circles is None:
-        return []
-    
-    candidates: List[BallDetection] = []
-    for center_x, center_y, radius in np.round(detected_circles[0]).astype(int):
-        candidates.append(
-            BallDetection(
-                int(x + center_x), int(roi_top + center_y), int(radius)
-            )
-        )
-
-    return select_balls_by_layout(candidates, x, surface_width)
-
-
-    
+    return result_image, result

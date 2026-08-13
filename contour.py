@@ -18,7 +18,9 @@ EXTREME_POINT_RADIUS = 4
 SECONDARY_POINT_RADIUS = 4
 LINE_THICKNESS = 1        # 확장 직선 두께
 EXTREME_SENCODARY_DIFF = 2
-MIN_DISTANCE = 50
+MIN_DISTANCE = 30
+CROP_RECTANGLE_COLOR = (255, 255, 0)
+CROP_RECTANGLE_THICKNESS = 1
 
 CONTOUR_COLOR = (0, 255, 0)
 TOP_COLOR = (255, 0, 0)
@@ -235,74 +237,47 @@ def draw_extended_line(img, pt1, pt2, color, thickness=1):
         cv2.line(img, p_a, p_b, color, thickness)
 
 
-def find_line_intersection(line1_start, line1_end, line2_start, line2_end):
-    """두 직선의 교차점을 반환한다. 평행한 경우 None을 반환한다."""
+def get_crop_rectangle(measurement, image_shape):
+    """하늘색 사각형과 Crop에 공통으로 사용할 좌표를 반환한다."""
 
-    x1, y1 = line1_start
-    x2, y2 = line1_end
-    x3, y3 = line2_start
-    x4, y4 = line2_end
+    image_height, image_width = image_shape
+    left = max(0, measurement.left_extreme[0])
+    top = max(0, measurement.top_extreme[1])
+    right = min(image_width - 1, measurement.right_extreme[0])
+    bottom = min(image_height - 1, measurement.bottom_extreme[1])
 
-    denominator = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-    if denominator == 0:
+    if left >= right or top >= bottom:
         return None
 
-    determinant1 = x1 * y2 - y1 * x2
-    determinant2 = x3 * y4 - y3 * x4
-    point_x = (determinant1 * (x3 - x4) - (x1 - x2) * determinant2) / denominator
-    point_y = (determinant1 * (y3 - y4) - (y1 - y2) * determinant2) / denominator
-    return point_x, point_y
+    return left, top, right, bottom
 
 
-def crop_between_extended_lines(image_b, measurement):
-    """상·하·좌·우 연장선의 내부 영역을 직사각형으로 펼쳐 Crop한다."""
+def crop_inside_rectangle(image_b, measurement):
+    """하늘색 사각형 내부만 B 페이지에서 Crop한다."""
 
-    lines = [
-        (measurement.top_extreme, measurement.top_secondary),
-        (measurement.bottom_extreme, measurement.bottom_secondary),
-        (measurement.left_extreme, measurement.left_secondary),
-        (measurement.right_extreme, measurement.right_secondary),
-    ]
-    if any(start is None or end is None for start, end in lines):
+    crop_rectangle = get_crop_rectangle(measurement, image_b.shape[:2])
+    if crop_rectangle is None:
         return None
 
-    top_line, bottom_line, left_line, right_line = lines
-    corners = [
-        find_line_intersection(*top_line, *left_line),
-        find_line_intersection(*top_line, *right_line),
-        find_line_intersection(*bottom_line, *right_line),
-        find_line_intersection(*bottom_line, *left_line),
-    ]
-    if any(corner is None for corner in corners):
-        return None
-
-    source_points = np.float32(corners)
-    top_width = np.linalg.norm(source_points[1] - source_points[0])
-    bottom_width = np.linalg.norm(source_points[2] - source_points[3])
-    left_height = np.linalg.norm(source_points[3] - source_points[0])
-    right_height = np.linalg.norm(source_points[2] - source_points[1])
-    crop_width = max(1, round(max(top_width, bottom_width)))
-    crop_height = max(1, round(max(left_height, right_height)))
-
-    target_points = np.float32(
-        [
-            [0, 0],
-            [crop_width - 1, 0],
-            [crop_width - 1, crop_height - 1],
-            [0, crop_height - 1],
-        ]
+    left, top, right, bottom = crop_rectangle
+    cropped_image = to_grayscale(image_b)[top : bottom + 1, left : right + 1]
+    cropped_image = cv2.cvtColor(cropped_image, cv2.COLOR_GRAY2BGR)
+    cv2.rectangle(
+        cropped_image,
+        (0, 0),
+        (cropped_image.shape[1] - 1, cropped_image.shape[0] - 1),
+        (0, 0, 0),
+        1,
     )
-    transform = cv2.getPerspectiveTransform(source_points, target_points)
-    source_image = cv2.cvtColor(to_grayscale(image_b), cv2.COLOR_GRAY2BGR)
-    return cv2.warpPerspective(source_image, transform, (crop_width, crop_height))
+    return cropped_image
 
 
 def create_crop_preview(image_b, measurements):
-    """컨투어별 Crop 이미지를 세로로 합쳐 사이드바 미리보기로 만든다."""
+    """하늘색 사각형 Crop 이미지를 사이드바 미리보기로 반환한다."""
 
     crops = []
     for measurement in measurements:
-        cropped_image = crop_between_extended_lines(image_b, measurement)
+        cropped_image = crop_inside_rectangle(image_b, measurement)
         if cropped_image is not None and cropped_image.size > 0:
             crops.append(cropped_image)
 
@@ -318,9 +293,10 @@ def create_crop_preview(image_b, measurements):
 
     offset_y = 0
     for crop in crops:
-        offset_x = (preview_width - crop.shape[1]) // 2
-        preview[offset_y : offset_y + crop.shape[0], offset_x : offset_x + crop.shape[1]] = crop
-        offset_y += crop.shape[0] + gap
+        crop_height, crop_width = crop.shape[:2]
+        offset_x = (preview_width - crop_width) // 2
+        preview[offset_y : offset_y + crop_height, offset_x : offset_x + crop_width] = crop
+        offset_y += crop_height + gap
 
     return preview
 
@@ -351,6 +327,17 @@ def create_detection_visualization(image_path):
         draw_extended_line(result_image, measurement.bottom_extreme, measurement.bottom_secondary, BOTTOM_COLOR, LINE_THICKNESS)
         draw_extended_line(result_image, measurement.left_extreme, measurement.left_secondary, LEFT_COLOR, LINE_THICKNESS)
         draw_extended_line(result_image, measurement.right_extreme, measurement.right_secondary, RIGHT_COLOR, LINE_THICKNESS)
+
+        crop_rectangle = get_crop_rectangle(measurement, gray.shape)
+        if crop_rectangle is not None:
+            left, top, right, bottom = crop_rectangle
+            cv2.rectangle(
+                result_image,
+                (left, top),
+                (right, bottom),
+                CROP_RECTANGLE_COLOR,
+                CROP_RECTANGLE_THICKNESS,
+            )
 
         # 2. 샘플 점들 그리기
         point_groups = [

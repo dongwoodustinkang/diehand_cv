@@ -8,10 +8,18 @@
 #### Side Surface
 1. Processed the side images using brightness binarization and contouring, generating vertical search lines based on the initial contact points from the image edges to the surface.
      - To prevent errors caused by a slight rotation of the side, the surface was divided into ‭$N$‬ segments to accurately identify the contact points.
-2. For the side balls, the bottom section of the surface contour was divided into three parts to find the furthest point, and the process of fitting a circle centered on that point is currently in progress.
+2. For the side balls, a bottom surface ROI is created to find the first contact points. Three points are selected where each is at least 60 pixels apart horizontally and 20 pixels away from the tangent line, and circles are drawn based on a diameter length.
 
 #### Top-Bottom Surface
-_[Upcoming]_
+1. Detect the contour on B page and project its dotted bottom contact points to
+   the identical surface position on A page.
+2. Search a 150px ROI below the bottom tangent from bottom to top, then select
+   up to three first-contact points at least 60px apart and 40px below the
+   tangent.
+3. Draw a circle whose diameter is the distance between each selected contact
+   point and the bottom tangent.
+4. Keep the surface Crop preview and show only the pixels inside the red
+   circles in a separate sidebar preview.
 
 
 ## Project Structure

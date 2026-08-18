@@ -24,6 +24,7 @@ from styles import APP_STYLESHEET
 
 IMAGE_EXTS = {".tif", ".tiff"}
 DEFAULT_DIR = "dataset/"
+CIRCLE_PREVIEW_SCALE = 0.85
 
 
 class MainWindow(QMainWindow):
@@ -40,6 +41,7 @@ class MainWindow(QMainWindow):
         self.original_pixmap = QPixmap() # 원본 이미지
         self.result_pixmap = QPixmap() # B 페이지 이미지
         self.crop_preview_pixmap = QPixmap()
+        self.circle_preview_pixmap = QPixmap()
         self._build_ui()
 
     def _build_ui(self):
@@ -157,6 +159,7 @@ class MainWindow(QMainWindow):
         controls_title.setObjectName("sectionTitle")
         controls_layout.addWidget(controls_title)
         self.crop_preview_label = self._create_crop_preview(controls_layout)
+        self.circle_preview_label = self._create_circle_preview(controls_layout)
         controls_layout.addStretch(1)
 
         self.import_btn = QPushButton("불러오기")
@@ -171,21 +174,31 @@ class MainWindow(QMainWindow):
         return controls
 
     def _create_crop_preview(self, parent_layout):
+        return self._create_preview_card(
+            parent_layout, "선 내부 Crop", "컨투어 분석 후 표시됩니다."
+        )
+
+    def _create_circle_preview(self, parent_layout):
+        return self._create_preview_card(
+            parent_layout, "원 내부 Preview", "원 검출 후 표시됩니다.", 120
+        )
+
+    def _create_preview_card(self, parent_layout, title_text, empty_text, minimum_height=180):
         preview_card = QFrame()
         preview_card.setObjectName("imageCard")
         preview_layout = QVBoxLayout(preview_card)
         preview_layout.setContentsMargins(10, 10, 10, 10)
         preview_layout.setSpacing(6)
 
-        title = QLabel("선 내부 Crop")
+        title = QLabel(title_text)
         title.setObjectName("cardTitle")
         preview_layout.addWidget(title)
 
-        preview_label = QLabel("컨투어 분석 후 표시됩니다.")
+        preview_label = QLabel(empty_text)
         preview_label.setObjectName("imagePreview")
         preview_label.setAlignment(Qt.AlignCenter)
         preview_label.setWordWrap(True)
-        preview_label.setMinimumHeight(180)
+        preview_label.setMinimumHeight(minimum_height)
         preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         preview_layout.addWidget(preview_label)
         parent_layout.addWidget(preview_card)
@@ -276,6 +289,7 @@ class MainWindow(QMainWindow):
         self._show_source_image(source_image)
         self._show_result_image(result_image)
         self._show_crop_preview(result.crop_preview)
+        self._show_circle_preview(result.circle_preview)
         self._update_info_label(path, result, elapsed_seconds, images_per_second)
 
     def _show_source_image(self, bgr_image):
@@ -295,6 +309,20 @@ class MainWindow(QMainWindow):
 
         self.crop_preview_pixmap = self._pixmap_from_bgr_image(bgr_image)
         self._set_scaled_pixmap(self.crop_preview_label, self.crop_preview_pixmap)
+
+    def _show_circle_preview(self, bgr_image):
+        if bgr_image is None or bgr_image.size == 0:
+            self.circle_preview_pixmap = QPixmap()
+            self.circle_preview_label.setPixmap(QPixmap())
+            self.circle_preview_label.setText("검출된 원이 없습니다.")
+            return
+
+        self.circle_preview_pixmap = self._pixmap_from_bgr_image(bgr_image)
+        self._set_scaled_pixmap(
+            self.circle_preview_label,
+            self.circle_preview_pixmap,
+            preview_scale=CIRCLE_PREVIEW_SCALE,
+        )
 
     @staticmethod
     def _pixmap_from_bgr_image(bgr_image):
@@ -322,6 +350,9 @@ class MainWindow(QMainWindow):
         self.crop_preview_pixmap = QPixmap()
         self.crop_preview_label.setPixmap(QPixmap())
         self.crop_preview_label.setText("컨투어 분석 후 표시됩니다.")
+        self.circle_preview_pixmap = QPixmap()
+        self.circle_preview_label.setPixmap(QPixmap())
+        self.circle_preview_label.setText("원 검출 후 표시됩니다.")
 
     def _update_info_label(
         self, path, result=None, elapsed_seconds=None, images_per_second=None
@@ -354,6 +385,12 @@ class MainWindow(QMainWindow):
             self._set_scaled_pixmap(self.result_label, self.result_pixmap)
         if not self.crop_preview_pixmap.isNull():
             self._set_scaled_pixmap(self.crop_preview_label, self.crop_preview_pixmap)
+        if not self.circle_preview_pixmap.isNull():
+            self._set_scaled_pixmap(
+                self.circle_preview_label,
+                self.circle_preview_pixmap,
+                preview_scale=CIRCLE_PREVIEW_SCALE,
+            )
     def showEvent(self, event):
         super().showEvent(event)
         self._refresh_scaled_pixmaps()

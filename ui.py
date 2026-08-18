@@ -248,8 +248,6 @@ class MainWindow(QMainWindow):
 
     def _show_current(self):
         path = self.image_paths[self.current_index]
-        self.original_pixmap = QPixmap(str(path))
-        self._set_scaled_pixmap(self.image_label, self.original_pixmap)
         self.index_label.setText(f"{self.current_index + 1} / {len(self.image_paths)}")
         self.prev_btn.setEnabled(self.current_index > 0)
         self.next_btn.setEnabled(self.current_index < len(self.image_paths) - 1)
@@ -267,7 +265,7 @@ class MainWindow(QMainWindow):
         path = self.image_paths[self.current_index]
         started_at = perf_counter()
         try:
-            result_image, result = create_detection_visualization(path)
+            source_image, result_image, result = create_detection_visualization(path)
         except ValueError as error:
             self._clear_result("검출에 실패했습니다.")
             QMessageBox.critical(self, "검출", str(error))
@@ -275,9 +273,14 @@ class MainWindow(QMainWindow):
 
         elapsed_seconds = perf_counter() - started_at
         images_per_second = 1 / max(elapsed_seconds, 0.000001)
+        self._show_source_image(source_image)
         self._show_result_image(result_image)
         self._show_crop_preview(result.crop_preview)
         self._update_info_label(path, result, elapsed_seconds, images_per_second)
+
+    def _show_source_image(self, bgr_image):
+        self.original_pixmap = self._pixmap_from_bgr_image(bgr_image)
+        self._set_scaled_pixmap(self.image_label, self.original_pixmap)
 
     def _show_result_image(self, bgr_image):
         self.result_pixmap = self._pixmap_from_bgr_image(bgr_image)

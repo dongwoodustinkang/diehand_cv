@@ -74,6 +74,15 @@ def to_grayscale(image):
     return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
 
+def to_bgr(image):
+    """시각화 선을 겹칠 수 있도록 이미지를 3채널 BGR로 변환한다."""
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    return image.copy()
+
+
 def find_b_contours(image_b):
     """그레이 스케일, 이진화, 컨투어링 작업."""
     gray = to_grayscale(image_b) # 그레이스케일
@@ -301,14 +310,47 @@ def create_crop_preview(image_b, measurements):
     return preview
 
 
+def draw_bottom_reference_line(image, measurement):
+    """하단 극단점 두 개로 만든 기준선을 한 페이지에 그린다."""
+
+    draw_extended_line(
+        image,
+        measurement.bottom_extreme,
+        measurement.bottom_secondary,
+        BOTTOM_COLOR,
+        LINE_THICKNESS,
+    )
+
+
+def draw_contact_points(image, points, color):
+    """B 페이지와 동일한 크기와 색의 접점 점선을 그린다."""
+
+    for point in points:
+        cv2.circle(image, point, POINT_RADIUS, color, thickness=cv2.FILLED)
+
+
+def create_a_visualization(image_a, measurements):
+    """B 페이지의 하단 접점 점선을 A 페이지의 동일 좌표에 표시한다."""
+
+    source_image = to_bgr(image_a)
+    for measurement in measurements:
+        # A/B 페이지는 같은 크기와 좌표계를 공유하므로 B의 하단 점선을 그대로 사용한다.
+        draw_contact_points(source_image, measurement.bottom_points, BOTTOM_COLOR)
+    return source_image
+
+
 def create_detection_visualization(image_path):
-    """B 페이지 컨투어, 샘플 접점, 극단점, 보조점 및 연장된 직선 이미지를 만든다."""
+    """A/B 페이지 시각화와 B 페이지 컨투어 분석 결과를 만든다."""
 
     success, images = cv2.imreadmulti(str(image_path), flags=cv2.IMREAD_UNCHANGED)
     if not success or len(images) < 2:
         raise ValueError(f"A/B 두 페이지 TIFF를 읽을 수 없습니다: {image_path}")
 
+    image_a = images[0]
     image_b = images[1]
+    if image_a.shape[:2] != image_b.shape[:2]:
+        raise ValueError(f"A/B 페이지 크기가 일치하지 않습니다: {image_path}")
+
     gray = to_grayscale(image_b) # 이미지 파일 그레이 스케일 
     result = find_b_contours(image_b) # 컨투어링 작업
 
@@ -317,6 +359,7 @@ def create_detection_visualization(image_path):
         measurement = find_first_contact_points(contour, gray.shape)
         result.measurements.append(measurement)
 
+    source_image = create_a_visualization(image_a, result.measurements)
     result.crop_preview = create_crop_preview(image_b, result.measurements) # 사이드바 프리뷰
     result_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) # 그레이 스케일를 컬로로 변환하여 컨투어 색상이 보이게
     cv2.drawContours(result_image, result.contours, -1, CONTOUR_COLOR, 1) # 컨투어 그리기 
@@ -324,7 +367,7 @@ def create_detection_visualization(image_path):
     for measurement in result.measurements:
         # 1. 상·하·좌·우 두 점 연결 직선 그리기 (이미지 끝까지 연장)
         draw_extended_line(result_image, measurement.top_extreme, measurement.top_secondary, TOP_COLOR, LINE_THICKNESS)
-        draw_extended_line(result_image, measurement.bottom_extreme, measurement.bottom_secondary, BOTTOM_COLOR, LINE_THICKNESS)
+        draw_bottom_reference_line(result_image, measurement)
         draw_extended_line(result_image, measurement.left_extreme, measurement.left_secondary, LEFT_COLOR, LINE_THICKNESS)
         draw_extended_line(result_image, measurement.right_extreme, measurement.right_secondary, RIGHT_COLOR, LINE_THICKNESS)
 
@@ -347,8 +390,7 @@ def create_detection_visualization(image_path):
             (measurement.right_points, RIGHT_COLOR),
         ]
         for points, color in point_groups:
-            for point in points:
-                cv2.circle(result_image, point, POINT_RADIUS, color, thickness=cv2.FILLED)
+            draw_contact_points(result_image, points, color)
 
         # 3. 절대 극단점 그리기 (노란색)
         extreme_points = [
@@ -374,4 +416,4 @@ def create_detection_visualization(image_path):
                 cv2.circle(result_image, sec_point, SECONDARY_POINT_RADIUS, SECONDARY_POINT_COLOR, thickness=cv2.FILLED)
                 cv2.circle(result_image, sec_point, SECONDARY_POINT_RADIUS + 1, (0, 0, 0), thickness=1)
 
-    return result_image, result
+    return source_image, result_image, result

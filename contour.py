@@ -11,6 +11,10 @@ MAX_CONTOUR_AREA = 10000
 # 샘플링 개수 설정
 TOP_BOTTOM_SAMPLE_COUNT = 15
 LEFT_RIGHT_SAMPLE_COUNT = 5
+BOTTOM_ROI_HEIGHT = 150
+MIN_BOTTOM_CONTACT_X_DISTANCE = 60
+MIN_BOTTOM_CONTACT_DISTANCE_FROM_TANGENT = 20
+WHITE_PIXEL_THRESHOLD = 245
 
 # 점(원)의 크기 조절
 POINT_RADIUS = 2
@@ -21,6 +25,8 @@ EXTREME_SENCODARY_DIFF = 2
 MIN_DISTANCE = 30
 CROP_RECTANGLE_COLOR = (255, 255, 0)
 CROP_RECTANGLE_THICKNESS = 1
+BOTTOM_ROI_COLOR = (255, 255, 0)
+BOTTOM_CONTACT_POINT_RADIUS = 4
 
 CONTOUR_COLOR = (0, 255, 0)
 TOP_COLOR = (255, 0, 0)
@@ -329,13 +335,155 @@ def draw_contact_points(image, points, color):
         cv2.circle(image, point, POINT_RADIUS, color, thickness=cv2.FILLED)
 
 
+def get_line_y_at_x(pt1, pt2, point_x):
+    """두 점으로 정의한 접선에서 지정한 x 좌표의 y 좌표를 반환한다."""
+
+    if pt1 is None or pt2 is None:
+        return None
+
+    x1, y1 = pt1
+    x2, y2 = pt2
+    if x1 == x2:
+        return round((y1 + y2) / 2)
+    return round(y1 + (point_x - x1) * (y2 - y1) / (x2 - x1))
+
+
+def get_bottom_tangent_span(measurement, image_shape):
+    """하단 접점 점선이 놓인 접선의 좌우 범위와 양 끝 y 좌표를 반환한다."""
+
+    if len(measurement.bottom_points) < 2:
+        return None
+
+    image_height, image_width = image_shape[:2]
+    left_x = min(point[0] for point in measurement.bottom_points)
+    right_x = max(point[0] for point in measurement.bottom_points)
+    if left_x >= right_x:
+        return None
+
+    top_left_y = get_line_y_at_x(
+        measurement.bottom_extreme, measurement.bottom_secondary, left_x
+    )
+    top_right_y = get_line_y_at_x(
+        measurement.bottom_extreme, measurement.bottom_secondary, right_x
+    )
+    if top_left_y is None or top_right_y is None:
+        return None
+
+    return (
+        int(np.clip(left_x, 0, image_width - 1)),
+        int(np.clip(right_x, 0, image_width - 1)),
+        int(np.clip(top_left_y, 0, image_height - 1)),
+        int(np.clip(top_right_y, 0, image_height - 1)),
+    )
+
+
+def draw_bottom_roi(image, measurement):
+    """하단 접선에서 아래로 150px인 ROI의 좌·우·하단 경계를 표시한다."""
+
+    tangent_span = get_bottom_tangent_span(measurement, image.shape)
+    if tangent_span is None:
+        return
+
+    left_x, right_x, top_left_y, top_right_y = tangent_span
+    image_height = image.shape[0]
+    bottom_left_y = min(image_height - 1, top_left_y + BOTTOM_ROI_HEIGHT)
+    bottom_right_y = min(image_height - 1, top_right_y + BOTTOM_ROI_HEIGHT)
+    cv2.line(image, (left_x, top_left_y), (left_x, bottom_left_y), BOTTOM_ROI_COLOR, 1)
+    cv2.line(
+        image,
+        (left_x, bottom_left_y),
+        (right_x, bottom_right_y),
+        BOTTOM_ROI_COLOR,
+        1,
+    )
+    cv2.line(image, (right_x, bottom_right_y), (right_x, top_right_y), BOTTOM_ROI_COLOR, 1)
+
+
+def find_bottom_roi_contact_points(gray_image, measurement):
+    """ROI 하단부터 위로 탐색해 조건을 만족하는 첫 접점 최대 3개를 찾는다."""
+
+    tangent_span = get_bottom_tangent_span(measurement, gray_image.shape)
+    if tangent_span is None:
+        return []
+
+    left_x, right_x, _, _ = tangent_span
+    image_height = gray_image.shape[0]
+    candidates = []
+    for point_x in range(left_x, right_x + 1):
+        tangent_y = get_line_y_at_x(
+            measurement.bottom_extreme, measurement.bottom_secondary, point_x
+        )
+        if tangent_y is None:
+            continue
+
+        roi_top_y = int(np.clip(tangent_y, 0, image_height - 1))
+        roi_bottom_y = min(image_height - 1, roi_top_y + BOTTOM_ROI_HEIGHT)
+        column = gray_image[roi_top_y : roi_bottom_y + 1, point_x]
+        non_white_offsets = np.where(column < WHITE_PIXEL_THRESHOLD)[0]
+        if len(non_white_offsets) == 0:
+            continue
+
+        # ROI 가장 밑에서 위로 올라갈 때 처음 닿는 비백색 픽셀이다.
+        contact_y = roi_top_y + int(non_white_offsets[-1])
+        if contact_y - tangent_y < MIN_BOTTOM_CONTACT_DISTANCE_FROM_TANGENT:
+            continue
+        candidates.append((point_x, contact_y))
+
+    candidates.sort(key=lambda point: (-point[1], point[0]))
+    contact_points = []
+    for candidate in candidates:
+        if all(
+            abs(candidate[0] - contact[0]) >= MIN_BOTTOM_CONTACT_X_DISTANCE
+            for contact in contact_points
+        ):
+            contact_points.append(candidate)
+        if len(contact_points) == 3:
+            break
+    return sorted(contact_points)
+
+
+def draw_bottom_roi_contact_points(image, measurement, contact_points):
+    """접점과 접선 사이 거리를 지름으로 하는 원과 접점을 표시한다."""
+
+    for point in contact_points:
+        tangent_y = get_line_y_at_x(
+            measurement.bottom_extreme, measurement.bottom_secondary, point[0]
+        )
+        if tangent_y is None:
+            continue
+
+        diameter = point[1] - tangent_y
+        if diameter > 0:
+            center = (point[0], round((tangent_y + point[1]) / 2))
+            cv2.circle(image, center, round(diameter / 2), BOTTOM_COLOR, thickness=1)
+
+        cv2.circle(
+            image,
+            point,
+            BOTTOM_CONTACT_POINT_RADIUS,
+            EXTREME_POINT_COLOR,
+            thickness=cv2.FILLED,
+        )
+        cv2.circle(
+            image,
+            point,
+            BOTTOM_CONTACT_POINT_RADIUS + 1,
+            (0, 0, 0),
+            thickness=1,
+        )
+
+
 def create_a_visualization(image_a, measurements):
-    """B 페이지의 하단 접점 점선을 A 페이지의 동일 좌표에 표시한다."""
+    """A 페이지에 B의 하단 점선, ROI와 ROI 하단 접점을 표시한다."""
 
     source_image = to_bgr(image_a)
+    source_gray = to_grayscale(image_a)
     for measurement in measurements:
         # A/B 페이지는 같은 크기와 좌표계를 공유하므로 B의 하단 점선을 그대로 사용한다.
+        draw_bottom_roi(source_image, measurement)
         draw_contact_points(source_image, measurement.bottom_points, BOTTOM_COLOR)
+        contact_points = find_bottom_roi_contact_points(source_gray, measurement)
+        draw_bottom_roi_contact_points(source_image, measurement, contact_points)
     return source_image
 
 

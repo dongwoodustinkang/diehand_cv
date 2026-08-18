@@ -27,6 +27,9 @@ CROP_RECTANGLE_COLOR = (255, 255, 0)
 CROP_RECTANGLE_THICKNESS = 1
 BOTTOM_ROI_COLOR = (255, 255, 0)
 BOTTOM_CONTACT_POINT_RADIUS = 4
+CIRCLE_PREVIEW_OUTLINE_PADDING = 1
+CIRCLE_PREVIEW_TILE_PADDING = 2
+CIRCLE_PREVIEW_GAP = 6
 
 CONTOUR_COLOR = (0, 255, 0)
 TOP_COLOR = (255, 0, 0)
@@ -69,6 +72,7 @@ class DetectionResult:
     contours: List[np.ndarray] = field(default_factory=list)
     measurements: List[ContourMeasurement] = field(default_factory=list)
     crop_preview: Optional[np.ndarray] = None
+    circle_preview: Optional[np.ndarray] = None
 
 
 def to_grayscale(image):
@@ -442,20 +446,29 @@ def find_bottom_roi_contact_points(gray_image, measurement):
     return sorted(contact_points)
 
 
+def get_bottom_contact_circle(measurement, point):
+    """접점과 동일 x좌표의 접선이 만드는 원의 중심과 반지름을 반환한다."""
+
+    tangent_y = get_line_y_at_x(
+        measurement.bottom_extreme, measurement.bottom_secondary, point[0]
+    )
+    if tangent_y is None:
+        return None
+
+    diameter = point[1] - tangent_y
+    if diameter <= 0:
+        return None
+    return (point[0], round((tangent_y + point[1]) / 2)), round(diameter / 2)
+
+
 def draw_bottom_roi_contact_points(image, measurement, contact_points):
     """접점과 접선 사이 거리를 지름으로 하는 원과 접점을 표시한다."""
 
     for point in contact_points:
-        tangent_y = get_line_y_at_x(
-            measurement.bottom_extreme, measurement.bottom_secondary, point[0]
-        )
-        if tangent_y is None:
-            continue
-
-        diameter = point[1] - tangent_y
-        if diameter > 0:
-            center = (point[0], round((tangent_y + point[1]) / 2))
-            cv2.circle(image, center, round(diameter / 2), BOTTOM_COLOR, thickness=1)
+        circle = get_bottom_contact_circle(measurement, point)
+        if circle is not None:
+            center, radius = circle
+            cv2.circle(image, center, radius, BOTTOM_COLOR, thickness=1)
 
         cv2.circle(
             image,
@@ -471,6 +484,61 @@ def draw_bottom_roi_contact_points(image, measurement, contact_points):
             (0, 0, 0),
             thickness=1,
         )
+
+
+def create_circle_preview(image_a, measurements):
+    """노란 접점 없이 원 내부 픽셀과 빨간 원 테두리만 미리보기로 만든다."""
+
+    source_gray = to_grayscale(image_a)
+    circles = []
+    for measurement in measurements:
+        contact_points = find_bottom_roi_contact_points(source_gray, measurement)
+        for point in contact_points:
+            circle = get_bottom_contact_circle(measurement, point)
+            if circle is not None:
+                circles.append(circle)
+
+    if not circles:
+        return None
+
+    source_image = to_bgr(image_a)
+    image_height, image_width = source_image.shape[:2]
+    circle_tiles = []
+    for (center_x, center_y), radius in sorted(circles):
+        extent = radius + CIRCLE_PREVIEW_OUTLINE_PADDING + CIRCLE_PREVIEW_TILE_PADDING
+        left = max(0, center_x - extent)
+        top = max(0, center_y - extent)
+        right = min(image_width - 1, center_x + extent)
+        bottom = min(image_height - 1, center_y + extent)
+
+        tile_source = source_image[top : bottom + 1, left : right + 1].copy()
+        tile_mask = np.zeros(tile_source.shape[:2], dtype=np.uint8)
+        local_center = (center_x - left, center_y - top)
+        cv2.circle(tile_source, local_center, radius, BOTTOM_COLOR, thickness=1)
+        cv2.circle(
+            tile_mask,
+            local_center,
+            radius + CIRCLE_PREVIEW_OUTLINE_PADDING,
+            255,
+            thickness=cv2.FILLED,
+        )
+
+        tile = np.full_like(tile_source, 255)
+        tile[tile_mask == 255] = tile_source[tile_mask == 255]
+        circle_tiles.append(tile)
+
+    preview_height = max(tile.shape[0] for tile in circle_tiles)
+    preview_width = sum(tile.shape[1] for tile in circle_tiles)
+    preview_width += CIRCLE_PREVIEW_GAP * (len(circle_tiles) - 1)
+    preview = np.full((preview_height, preview_width, 3), 255, dtype=np.uint8)
+
+    offset_x = 0
+    for tile in circle_tiles:
+        offset_y = (preview_height - tile.shape[0]) // 2
+        tile_height, tile_width = tile.shape[:2]
+        preview[offset_y : offset_y + tile_height, offset_x : offset_x + tile_width] = tile
+        offset_x += tile_width + CIRCLE_PREVIEW_GAP
+    return preview
 
 
 def create_a_visualization(image_a, measurements):
@@ -508,6 +576,7 @@ def create_detection_visualization(image_path):
         result.measurements.append(measurement)
 
     source_image = create_a_visualization(image_a, result.measurements)
+    result.circle_preview = create_circle_preview(image_a, result.measurements)
     result.crop_preview = create_crop_preview(image_b, result.measurements) # 사이드바 프리뷰
     result_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) # 그레이 스케일를 컬로로 변환하여 컨투어 색상이 보이게
     cv2.drawContours(result_image, result.contours, -1, CONTOUR_COLOR, 1) # 컨투어 그리기 

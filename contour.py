@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 
 # 검출할 컨투어의 최소/최대 크기
-MIN_CONTOUR_AREA = 4000 
+MIN_CONTOUR_AREA = 3500
 MAX_CONTOUR_AREA = 10000
 
 # 샘플링 개수 설정
@@ -13,14 +13,13 @@ TOP_BOTTOM_SAMPLE_COUNT = 15
 LEFT_RIGHT_SAMPLE_COUNT = 5
 
 # 점(원)의 크기 조절
-POINT_RADIUS = 2
-EXTREME_POINT_RADIUS = 4
-SECONDARY_POINT_RADIUS = 4
+POINT_RADIUS = 1
+EXTREME_POINT_RADIUS = 3
+SECONDARY_POINT_RADIUS = 3
 LINE_THICKNESS = 1        # 확장 직선 두께
 EXTREME_SENCODARY_DIFF = 2
 MIN_DISTANCE = 30
-CROP_RECTANGLE_COLOR = (255, 255, 0)
-CROP_RECTANGLE_THICKNESS = 1
+APPROX_POLYGON_EPSILON_RATIO = 0.02
 
 CONTOUR_COLOR = (0, 255, 0)
 TOP_COLOR = (255, 0, 0)
@@ -62,7 +61,8 @@ class DetectionResult:
 
     contours: List[np.ndarray] = field(default_factory=list)
     measurements: List[ContourMeasurement] = field(default_factory=list)
-    crop_preview: Optional[np.ndarray] = None
+    analysis_preview: Optional[np.ndarray] = None
+    source_preview: Optional[np.ndarray] = None
 
 
 def to_grayscale(image):
@@ -72,6 +72,24 @@ def to_grayscale(image):
     if image.shape[2] == 4:
         return cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
     return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+
+def to_bgr(image):
+    """미리보기에 사용할 이미지를 BGR 3채널로 변환한다."""
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    return image.copy()
+
+
+def to_bgra(image):
+    """투명 Preview에 사용할 이미지를 BGRA 4채널로 변환한다."""
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGRA)
+    if image.shape[2] == 3:
+        return cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
+    return image.copy()
 
 
 def find_b_contours(image_b):
@@ -237,78 +255,90 @@ def draw_extended_line(img, pt1, pt2, color, thickness=1):
         cv2.line(img, p_a, p_b, color, thickness)
 
 
-def get_crop_rectangle(measurement, image_shape):
-    """하늘색 사각형과 Crop에 공통으로 사용할 좌표를 반환한다."""
+def stack_preview_tiles(tiles):
+    """여러 BGRA Preview 타일을 투명한 세로 Preview로 합친다."""
 
-    image_height, image_width = image_shape
-    left = max(0, measurement.left_extreme[0])
-    top = max(0, measurement.top_extreme[1])
-    right = min(image_width - 1, measurement.right_extreme[0])
-    bottom = min(image_height - 1, measurement.bottom_extreme[1])
-
-    if left >= right or top >= bottom:
+    if not tiles:
         return None
-
-    return left, top, right, bottom
-
-
-def crop_inside_rectangle(image_b, measurement):
-    """하늘색 사각형 내부만 B 페이지에서 Crop한다."""
-
-    crop_rectangle = get_crop_rectangle(measurement, image_b.shape[:2])
-    if crop_rectangle is None:
-        return None
-
-    left, top, right, bottom = crop_rectangle
-    cropped_image = to_grayscale(image_b)[top : bottom + 1, left : right + 1]
-    cropped_image = cv2.cvtColor(cropped_image, cv2.COLOR_GRAY2BGR)
-    cv2.rectangle(
-        cropped_image,
-        (0, 0),
-        (cropped_image.shape[1] - 1, cropped_image.shape[0] - 1),
-        (0, 0, 0),
-        1,
-    )
-    return cropped_image
-
-
-def create_crop_preview(image_b, measurements):
-    """하늘색 사각형 Crop 이미지를 사이드바 미리보기로 반환한다."""
-
-    crops = []
-    for measurement in measurements:
-        cropped_image = crop_inside_rectangle(image_b, measurement)
-        if cropped_image is not None and cropped_image.size > 0:
-            crops.append(cropped_image)
-
-    if not crops:
-        return None
-    if len(crops) == 1:
-        return crops[0]
+    if len(tiles) == 1:
+        return tiles[0]
 
     gap = 8
-    preview_width = max(crop.shape[1] for crop in crops)
-    preview_height = sum(crop.shape[0] for crop in crops) + gap * (len(crops) - 1)
-    preview = np.full((preview_height, preview_width, 3), 249, dtype=np.uint8)
+    preview_width = max(tile.shape[1] for tile in tiles)
+    preview_height = sum(tile.shape[0] for tile in tiles) + gap * (len(tiles) - 1)
+    preview = np.zeros((preview_height, preview_width, 4), dtype=np.uint8)
 
     offset_y = 0
-    for crop in crops:
-        crop_height, crop_width = crop.shape[:2]
-        offset_x = (preview_width - crop_width) // 2
-        preview[offset_y : offset_y + crop_height, offset_x : offset_x + crop_width] = crop
-        offset_y += crop_height + gap
-
+    for tile in tiles:
+        tile_height, tile_width = tile.shape[:2]
+        offset_x = (preview_width - tile_width) // 2
+        preview[offset_y : offset_y + tile_height, offset_x : offset_x + tile_width] = tile
+        offset_y += tile_height + gap
     return preview
 
 
+def approximate_contour_polygon(contour):
+    """컨투어를 둘레 길이 비율 기반의 다각형으로 근사한다."""
+
+    perimeter = cv2.arcLength(contour, True)
+    if perimeter == 0:
+        return None
+    polygon = cv2.approxPolyDP(
+        contour, APPROX_POLYGON_EPSILON_RATIO * perimeter, True
+    )
+    return polygon if len(polygon) >= 3 else None
+
+
+def get_polygon_crop_bounds(polygon, image_shape):
+    """근사 다각형을 포함하는 최소 Crop 범위를 반환한다."""
+
+    image_height, image_width = image_shape
+    points = polygon[:, 0, :]
+    left = max(0, int(points[:, 0].min()))
+    top = max(0, int(points[:, 1].min()))
+    right = min(image_width, int(points[:, 0].max()) + 1)
+    bottom = min(image_height, int(points[:, 1].max()) + 1)
+    if left >= right or top >= bottom:
+        return None
+    return left, top, right, bottom
+
+
+def create_polygon_preview(image, contours):
+    """근사 컨투어 내부의 원본 픽셀만 남긴 투명 Preview를 만든다."""
+
+    tiles = []
+    for contour in contours:
+        polygon = approximate_contour_polygon(contour)
+        if polygon is None:
+            continue
+
+        bounds = get_polygon_crop_bounds(polygon, image.shape[:2])
+        if bounds is None:
+            continue
+
+        left, top, right, bottom = bounds
+        tile = to_bgra(image)[top:bottom, left:right].copy()
+        mask = np.zeros(tile.shape[:2], dtype=np.uint8)
+        local_polygon = polygon.copy()
+        local_polygon[:, 0, 0] -= left
+        local_polygon[:, 0, 1] -= top
+        cv2.fillPoly(mask, [local_polygon], 255, lineType=cv2.LINE_AA)
+        tile[:, :, 3] = cv2.bitwise_and(tile[:, :, 3], mask)
+        tiles.append(tile)
+    return stack_preview_tiles(tiles)
+
+
 def create_detection_visualization(image_path):
-    """B 페이지 컨투어, 샘플 접점, 극단점, 보조점 및 연장된 직선 이미지를 만든다."""
+    """B 분석선과 동일 좌표의 A 페이지 Crop 미리보기를 만든다."""
 
     success, images = cv2.imreadmulti(str(image_path), flags=cv2.IMREAD_UNCHANGED)
     if not success or len(images) < 2:
         raise ValueError(f"A/B 두 페이지 TIFF를 읽을 수 없습니다: {image_path}")
 
-    image_b = images[1]
+    image_a, image_b = images[:2]
+    if image_a.shape[:2] != image_b.shape[:2]:
+        raise ValueError(f"A/B 페이지 크기가 일치하지 않습니다: {image_path}")
+
     gray = to_grayscale(image_b) # 이미지 파일 그레이 스케일 
     result = find_b_contours(image_b) # 컨투어링 작업
 
@@ -317,7 +347,6 @@ def create_detection_visualization(image_path):
         measurement = find_first_contact_points(contour, gray.shape)
         result.measurements.append(measurement)
 
-    result.crop_preview = create_crop_preview(image_b, result.measurements) # 사이드바 프리뷰
     result_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) # 그레이 스케일를 컬로로 변환하여 컨투어 색상이 보이게
     cv2.drawContours(result_image, result.contours, -1, CONTOUR_COLOR, 1) # 컨투어 그리기 
 
@@ -327,17 +356,6 @@ def create_detection_visualization(image_path):
         draw_extended_line(result_image, measurement.bottom_extreme, measurement.bottom_secondary, BOTTOM_COLOR, LINE_THICKNESS)
         draw_extended_line(result_image, measurement.left_extreme, measurement.left_secondary, LEFT_COLOR, LINE_THICKNESS)
         draw_extended_line(result_image, measurement.right_extreme, measurement.right_secondary, RIGHT_COLOR, LINE_THICKNESS)
-
-        crop_rectangle = get_crop_rectangle(measurement, gray.shape)
-        if crop_rectangle is not None:
-            left, top, right, bottom = crop_rectangle
-            cv2.rectangle(
-                result_image,
-                (left, top),
-                (right, bottom),
-                CROP_RECTANGLE_COLOR,
-                CROP_RECTANGLE_THICKNESS,
-            )
 
         # 2. 샘플 점들 그리기
         point_groups = [
@@ -374,4 +392,6 @@ def create_detection_visualization(image_path):
                 cv2.circle(result_image, sec_point, SECONDARY_POINT_RADIUS, SECONDARY_POINT_COLOR, thickness=cv2.FILLED)
                 cv2.circle(result_image, sec_point, SECONDARY_POINT_RADIUS + 1, (0, 0, 0), thickness=1)
 
+    result.analysis_preview = create_polygon_preview(image_b, result.contours)
+    result.source_preview = create_polygon_preview(image_a, result.contours)
     return result_image, result

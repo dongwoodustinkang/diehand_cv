@@ -39,7 +39,8 @@ class MainWindow(QMainWindow):
         self.current_index = -1
         self.original_pixmap = QPixmap() # 원본 이미지
         self.result_pixmap = QPixmap() # B 페이지 이미지
-        self.crop_preview_pixmap = QPixmap()
+        self.analysis_preview_pixmap = QPixmap()
+        self.source_preview_pixmap = QPixmap()
         self._build_ui()
 
     def _build_ui(self):
@@ -54,6 +55,7 @@ class MainWindow(QMainWindow):
 
         root.addLayout(self._create_header())
         root.addLayout(self._create_workspace(), stretch=1)
+        root.addWidget(self._create_info_card())
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
 
@@ -89,27 +91,19 @@ class MainWindow(QMainWindow):
         return header
 
     def _create_workspace(self):
+        """A 페이지, B 페이지, 컨투어 분석을 같은 너비의 3열로 배치한다."""
         workspace = QHBoxLayout()
         workspace.setSpacing(16)
 
-        image_area = QVBoxLayout()
-        image_area.setSpacing(16)
-
-        image_row = QHBoxLayout()
-        image_row.setSpacing(16)
         source_card, self.image_label = self._create_image_card(
             "A 페이지", "A/B TIFF 이미지를 불러오세요."
         )
         result_card, self.result_label = self._create_image_card(
             "B 페이지", "B 페이지 컨투어 분석 결과가 표시됩니다."
         )
-        image_row.addWidget(source_card, stretch=1)
-        image_row.addWidget(result_card, stretch=1)
-        image_area.addLayout(image_row, stretch=1)
-        image_area.addWidget(self._create_info_card())
-
-        workspace.addLayout(image_area, stretch=1)
-        workspace.addWidget(self._create_control_sidebar())
+        workspace.addWidget(source_card, stretch=1)
+        workspace.addWidget(result_card, stretch=1)
+        workspace.addWidget(self._create_control_sidebar(), stretch=1)
         return workspace
 
     def _create_image_card(self, title_text, empty_text):
@@ -148,7 +142,6 @@ class MainWindow(QMainWindow):
     def _create_control_sidebar(self):
         controls = QFrame()
         controls.setObjectName("controlCard")
-        controls.setFixedWidth(254)
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(16, 14, 16, 14)
         controls_layout.setSpacing(10)
@@ -156,8 +149,16 @@ class MainWindow(QMainWindow):
         controls_title = QLabel("컨투어 분석")
         controls_title.setObjectName("sectionTitle")
         controls_layout.addWidget(controls_title)
-        self.crop_preview_label = self._create_crop_preview(controls_layout)
-        controls_layout.addStretch(1)
+        self.analysis_preview_label = self._create_preview_card(
+            controls_layout,
+            "B 페이지 컨투어",
+            "근사 컨투어 영역의 B 페이지 원본이 표시됩니다.",
+        )
+        self.source_preview_label = self._create_preview_card(
+            controls_layout,
+            "A 페이지 동일 컨투어",
+            "같은 컨투어 좌표의 A 페이지 원본이 표시됩니다.",
+        )
 
         self.import_btn = QPushButton("불러오기")
         self.import_btn.setObjectName("secondaryButton")
@@ -170,25 +171,25 @@ class MainWindow(QMainWindow):
 
         return controls
 
-    def _create_crop_preview(self, parent_layout):
+    def _create_preview_card(self, parent_layout, title_text, empty_text):
         preview_card = QFrame()
         preview_card.setObjectName("imageCard")
         preview_layout = QVBoxLayout(preview_card)
         preview_layout.setContentsMargins(10, 10, 10, 10)
         preview_layout.setSpacing(6)
 
-        title = QLabel("선 내부 Crop")
+        title = QLabel(title_text)
         title.setObjectName("cardTitle")
         preview_layout.addWidget(title)
 
-        preview_label = QLabel("컨투어 분석 후 표시됩니다.")
+        preview_label = QLabel(empty_text)
         preview_label.setObjectName("imagePreview")
         preview_label.setAlignment(Qt.AlignCenter)
         preview_label.setWordWrap(True)
-        preview_label.setMinimumHeight(180)
+        preview_label.setMinimumHeight(120)
         preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         preview_layout.addWidget(preview_label)
-        parent_layout.addWidget(preview_card)
+        parent_layout.addWidget(preview_card, stretch=1)
         return preview_label
 
     def _create_image_label(self, message):
@@ -276,30 +277,47 @@ class MainWindow(QMainWindow):
         elapsed_seconds = perf_counter() - started_at
         images_per_second = 1 / max(elapsed_seconds, 0.000001)
         self._show_result_image(result_image)
-        self._show_crop_preview(result.crop_preview)
+        self._show_analysis_preview(result.analysis_preview)
+        self._show_source_preview(result.source_preview)
         self._update_info_label(path, result, elapsed_seconds, images_per_second)
 
     def _show_result_image(self, bgr_image):
-        self.result_pixmap = self._pixmap_from_bgr_image(bgr_image)
+        self.result_pixmap = self._pixmap_from_image(bgr_image)
         self._set_scaled_pixmap(self.result_label, self.result_pixmap)
 
-    def _show_crop_preview(self, bgr_image):
+    def _show_analysis_preview(self, bgr_image):
         if bgr_image is None or bgr_image.size == 0:
-            self.crop_preview_pixmap = QPixmap()
-            self.crop_preview_label.setPixmap(QPixmap())
-            self.crop_preview_label.setText("사각형 Crop 영역이 없습니다.")
+            self.analysis_preview_pixmap = QPixmap()
+            self.analysis_preview_label.setPixmap(QPixmap())
+            self.analysis_preview_label.setText("검출된 분석 개체가 없습니다.")
             return
 
-        self.crop_preview_pixmap = self._pixmap_from_bgr_image(bgr_image)
-        self._set_scaled_pixmap(self.crop_preview_label, self.crop_preview_pixmap)
+        self.analysis_preview_pixmap = self._pixmap_from_image(bgr_image)
+        self._set_scaled_pixmap(self.analysis_preview_label, self.analysis_preview_pixmap)
+
+    def _show_source_preview(self, bgr_image):
+        if bgr_image is None or bgr_image.size == 0:
+            self.source_preview_pixmap = QPixmap()
+            self.source_preview_label.setPixmap(QPixmap())
+            self.source_preview_label.setText("표시할 A 페이지 좌표가 없습니다.")
+            return
+
+        self.source_preview_pixmap = self._pixmap_from_image(bgr_image)
+        self._set_scaled_pixmap(self.source_preview_label, self.source_preview_pixmap)
 
     @staticmethod
-    def _pixmap_from_bgr_image(bgr_image):
-        bgr_image = bgr_image.copy()
-        height, width, _ = bgr_image.shape
-        qimage = QImage(
-            bgr_image.tobytes(), width, height, width * 3, QImage.Format_BGR888
-        )
+    def _pixmap_from_image(image):
+        image = image.copy()
+        height, width, channels = image.shape
+        if channels == 4:
+            rgba_image = image[:, :, [2, 1, 0, 3]].copy()
+            qimage = QImage(
+                rgba_image.tobytes(), width, height, width * 4, QImage.Format_RGBA8888
+            )
+        else:
+            qimage = QImage(
+                image.tobytes(), width, height, width * 3, QImage.Format_BGR888
+            )
         return QPixmap.fromImage(qimage.copy())
 
     @staticmethod
@@ -316,9 +334,12 @@ class MainWindow(QMainWindow):
         self.result_pixmap = QPixmap()
         self.result_label.setPixmap(QPixmap())
         self.result_label.setText(message)
-        self.crop_preview_pixmap = QPixmap()
-        self.crop_preview_label.setPixmap(QPixmap())
-        self.crop_preview_label.setText("컨투어 분석 후 표시됩니다.")
+        self.analysis_preview_pixmap = QPixmap()
+        self.analysis_preview_label.setPixmap(QPixmap())
+        self.analysis_preview_label.setText("근사 컨투어 영역의 B 페이지 원본이 표시됩니다.")
+        self.source_preview_pixmap = QPixmap()
+        self.source_preview_label.setPixmap(QPixmap())
+        self.source_preview_label.setText("같은 컨투어 좌표의 A 페이지 원본이 표시됩니다.")
 
     def _update_info_label(
         self, path, result=None, elapsed_seconds=None, images_per_second=None
@@ -349,8 +370,14 @@ class MainWindow(QMainWindow):
             self._set_scaled_pixmap(self.image_label, self.original_pixmap)
         if not self.result_pixmap.isNull():
             self._set_scaled_pixmap(self.result_label, self.result_pixmap)
-        if not self.crop_preview_pixmap.isNull():
-            self._set_scaled_pixmap(self.crop_preview_label, self.crop_preview_pixmap)
+        if not self.analysis_preview_pixmap.isNull():
+            self._set_scaled_pixmap(
+                self.analysis_preview_label, self.analysis_preview_pixmap
+            )
+        if not self.source_preview_pixmap.isNull():
+            self._set_scaled_pixmap(
+                self.source_preview_label, self.source_preview_pixmap
+            )
     def showEvent(self, event):
         super().showEvent(event)
         self._refresh_scaled_pixmaps()

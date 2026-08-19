@@ -24,6 +24,7 @@ from styles import APP_STYLESHEET
 
 IMAGE_EXTS = {".tif", ".tiff"}
 DEFAULT_DIR = "dataset/"
+PREVIEW_SCALE = 0.8
 
 
 class MainWindow(QMainWindow):
@@ -293,7 +294,11 @@ class MainWindow(QMainWindow):
             return
 
         self.analysis_preview_pixmap = self._pixmap_from_image(bgr_image)
-        self._set_scaled_pixmap(self.analysis_preview_label, self.analysis_preview_pixmap)
+        self._set_scaled_pixmap(
+            self.analysis_preview_label,
+            self.analysis_preview_pixmap,
+            preview_scale=PREVIEW_SCALE,
+        )
 
     def _show_source_preview(self, bgr_image):
         if bgr_image is None or bgr_image.size == 0:
@@ -303,7 +308,11 @@ class MainWindow(QMainWindow):
             return
 
         self.source_preview_pixmap = self._pixmap_from_image(bgr_image)
-        self._set_scaled_pixmap(self.source_preview_label, self.source_preview_pixmap)
+        self._set_scaled_pixmap(
+            self.source_preview_label,
+            self.source_preview_pixmap,
+            preview_scale=PREVIEW_SCALE,
+        )
 
     @staticmethod
     def _pixmap_from_image(image):
@@ -372,11 +381,15 @@ class MainWindow(QMainWindow):
             self._set_scaled_pixmap(self.result_label, self.result_pixmap)
         if not self.analysis_preview_pixmap.isNull():
             self._set_scaled_pixmap(
-                self.analysis_preview_label, self.analysis_preview_pixmap
+                self.analysis_preview_label,
+                self.analysis_preview_pixmap,
+                preview_scale=PREVIEW_SCALE,
             )
         if not self.source_preview_pixmap.isNull():
             self._set_scaled_pixmap(
-                self.source_preview_label, self.source_preview_pixmap
+                self.source_preview_label,
+                self.source_preview_pixmap,
+                preview_scale=PREVIEW_SCALE,
             )
     def showEvent(self, event):
         super().showEvent(event)

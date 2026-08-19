@@ -20,6 +20,10 @@ LINE_THICKNESS = 1        # 확장 직선 두께
 EXTREME_SENCODARY_DIFF = 2
 MIN_DISTANCE = 30
 APPROX_POLYGON_EPSILON_RATIO = 0.02
+PREVIEW_MASK_MODE = "approx_polygon"
+# "contour", "approx_polygon", 또는 "line_quadrilateral"
+LINE_QUADRILATERAL_METHOD = "robust_contacts"
+# "robust_contacts" 또는 이전 방식인 "extreme_pairs"
 
 CONTOUR_COLOR = (0, 255, 0)
 TOP_COLOR = (255, 0, 0)
@@ -289,6 +293,135 @@ def approximate_contour_polygon(contour):
     return polygon if len(polygon) >= 3 else None
 
 
+def get_line_intersection(first_start, first_end, second_start, second_end):
+    """두 기준선의 교점을 반환하고, 평행하면 ``None``을 반환한다."""
+
+    first_start = np.asarray(first_start, dtype=float)
+    first_direction = np.asarray(first_end, dtype=float) - first_start
+    second_start = np.asarray(second_start, dtype=float)
+    second_direction = np.asarray(second_end, dtype=float) - second_start
+    denominator = np.cross(first_direction, second_direction)
+    if np.isclose(denominator, 0):
+        return None
+
+    distance = np.cross(second_start - first_start, second_direction) / denominator
+    return tuple(np.rint(first_start + distance * first_direction).astype(int))
+
+
+def fit_line_from_contact_points(points, orientation):
+    """방향별 중앙값 이상점을 제외한 접점으로 기준선을 피팅한다."""
+
+    if len(points) < 2:
+        return None
+
+    samples = np.asarray(points, dtype=np.float32)
+    coordinate_index = 1 if orientation == "horizontal" else 0
+    coordinate_values = samples[:, coordinate_index]
+    median = np.median(coordinate_values)
+    median_absolute_deviation = np.median(np.abs(coordinate_values - median))
+    tolerance = max(2.0, 3.0 * median_absolute_deviation)
+    inliers = samples[np.abs(coordinate_values - median) <= tolerance]
+    if len(inliers) < 2:
+        return None
+
+    vx, vy, x0, y0 = cv2.fitLine(
+        inliers.reshape(-1, 1, 2), cv2.DIST_L2, 0, 0.01, 0.01
+    )
+    direction = np.array([float(vx), float(vy)])
+    if np.linalg.norm(direction) == 0:
+        return None
+    origin = np.array([float(x0), float(y0)])
+    return tuple(origin - direction), tuple(origin + direction)
+
+
+def get_extreme_pair_lines(measurement):
+    """기존 극점·보조점 쌍으로 만든 네 기준선을 반환한다."""
+
+    return (
+        (measurement.top_extreme, measurement.top_secondary),
+        (measurement.bottom_extreme, measurement.bottom_secondary),
+        (measurement.left_extreme, measurement.left_secondary),
+        (measurement.right_extreme, measurement.right_secondary),
+    )
+
+
+def get_robust_contact_lines(measurement):
+    """상·하·좌·우 접점 집합으로 피팅한 네 기준선을 반환한다."""
+
+    return (
+        fit_line_from_contact_points(measurement.top_points, "horizontal"),
+        fit_line_from_contact_points(measurement.bottom_points, "horizontal"),
+        fit_line_from_contact_points(measurement.left_points, "vertical"),
+        fit_line_from_contact_points(measurement.right_points, "vertical"),
+    )
+
+
+def is_valid_line_quadrilateral(corners, measurement):
+    """교점 사각형이 컨투어 근방의 볼록한 도형인지 확인한다."""
+
+    if any(corner is None for corner in corners):
+        return False
+
+    polygon = np.asarray(corners, dtype=np.int32).reshape(-1, 1, 2)
+    if not cv2.isContourConvex(polygon) or cv2.contourArea(polygon) <= 0:
+        return False
+
+    x, y, width, height = measurement.bounding_rect
+    margin_x = max(12, round(width * 0.2))
+    margin_y = max(12, round(height * 0.2))
+    points = polygon[:, 0, :]
+    return (
+        points[:, 0].min() >= x - margin_x
+        and points[:, 0].max() <= x + width - 1 + margin_x
+        and points[:, 1].min() >= y - margin_y
+        and points[:, 1].max() <= y + height - 1 + margin_y
+    )
+
+
+def get_line_quadrilateral(measurement):
+    """상·하·좌·우 기준선의 교점 네 개를 시계 방향으로 반환한다."""
+
+    if LINE_QUADRILATERAL_METHOD == "robust_contacts":
+        lines = get_robust_contact_lines(measurement)
+    elif LINE_QUADRILATERAL_METHOD == "extreme_pairs":
+        lines = get_extreme_pair_lines(measurement)
+    else:
+        raise ValueError(
+            f"지원하지 않는 기준선 사각형 방식: {LINE_QUADRILATERAL_METHOD}"
+        )
+
+    if any(line is None or any(point is None for point in line) for line in lines):
+        return None
+    top, bottom, left, right = lines
+
+    corners = (
+        get_line_intersection(*top, *left),
+        get_line_intersection(*top, *right),
+        get_line_intersection(*bottom, *right),
+        get_line_intersection(*bottom, *left),
+    )
+    if any(corner is None for corner in corners):
+        return None
+    if (
+        LINE_QUADRILATERAL_METHOD == "robust_contacts"
+        and not is_valid_line_quadrilateral(corners, measurement)
+    ):
+        return None
+    return np.asarray(corners, dtype=np.int32).reshape(-1, 1, 2)
+
+
+def get_preview_mask_shape(contour, measurement):
+    """현재 설정에 맞는 Preview 마스크 도형을 반환한다."""
+    if PREVIEW_MASK_MODE == "contour":
+        return contour
+    if PREVIEW_MASK_MODE == "approx_polygon":
+        return approximate_contour_polygon(contour)
+    if PREVIEW_MASK_MODE == "line_quadrilateral":
+        quadrilateral = get_line_quadrilateral(measurement)
+        return quadrilateral if quadrilateral is not None else contour
+    raise ValueError(f"지원하지 않는 Preview 마스크 방식: {PREVIEW_MASK_MODE}")
+
+
 def get_polygon_crop_bounds(polygon, image_shape):
     """근사 다각형을 포함하는 최소 Crop 범위를 반환한다."""
 
@@ -303,12 +436,12 @@ def get_polygon_crop_bounds(polygon, image_shape):
     return left, top, right, bottom
 
 
-def create_polygon_preview(image, contours):
-    """근사 컨투어 내부의 원본 픽셀만 남긴 투명 Preview를 만든다."""
+def create_polygon_preview(image, contours, measurements):
+    """선택한 마스크 도형 내부의 원본 픽셀만 남긴 투명 Preview를 만든다."""
 
     tiles = []
-    for contour in contours:
-        polygon = approximate_contour_polygon(contour)
+    for contour, measurement in zip(contours, measurements):
+        polygon = get_preview_mask_shape(contour, measurement)
         if polygon is None:
             continue
 
@@ -392,6 +525,10 @@ def create_detection_visualization(image_path):
                 cv2.circle(result_image, sec_point, SECONDARY_POINT_RADIUS, SECONDARY_POINT_COLOR, thickness=cv2.FILLED)
                 cv2.circle(result_image, sec_point, SECONDARY_POINT_RADIUS + 1, (0, 0, 0), thickness=1)
 
-    result.analysis_preview = create_polygon_preview(image_b, result.contours)
-    result.source_preview = create_polygon_preview(image_a, result.contours)
+    result.analysis_preview = create_polygon_preview(
+        image_b, result.contours, result.measurements
+    )
+    result.source_preview = create_polygon_preview(
+        image_a, result.contours, result.measurements
+    )
     return result_image, result

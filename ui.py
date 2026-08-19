@@ -6,6 +6,7 @@ from time import perf_counter
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
+    QButtonGroup,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -38,6 +39,7 @@ class MainWindow(QMainWindow):
 
         self.image_paths = []
         self.current_index = -1
+        self.max_ball_count = 3
         self.original_pixmap = QPixmap() # 원본 이미지
         self.result_pixmap = QPixmap() # B 페이지 이미지
         self.analysis_preview_pixmap = QPixmap()
@@ -150,6 +152,7 @@ class MainWindow(QMainWindow):
         controls_title = QLabel("컨투어 분석")
         controls_title.setObjectName("sectionTitle")
         controls_layout.addWidget(controls_title)
+        controls_layout.addWidget(self._create_ball_count_control())
         self.analysis_preview_label = self._create_preview_card(
             controls_layout,
             "B 페이지 컨투어",
@@ -171,6 +174,45 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.detect_btn)
 
         return controls
+
+    def _create_ball_count_control(self):
+        """볼 탐지 로직에서 사용할 최대 탐지 개수 선택기를 만든다."""
+        setting_row = QFrame()
+        setting_row.setObjectName("settingRow")
+        layout = QHBoxLayout(setting_row)
+        layout.setContentsMargins(10, 8, 8, 8)
+        layout.setSpacing(8)
+
+        label = QLabel("최대 볼 탐지 개수")
+        label.setObjectName("controlLabel")
+        segment = QFrame()
+        segment.setObjectName("ballCountSegment")
+        segment_layout = QHBoxLayout(segment)
+        segment_layout.setContentsMargins(2, 2, 2, 2)
+        segment_layout.setSpacing(1)
+
+        self.max_ball_count_group = QButtonGroup(self)
+        self.max_ball_count_group.setExclusive(True)
+        self.max_ball_count_buttons = {}
+        for count in (2, 3):
+            button = QPushButton(str(count))
+            button.setObjectName("ballCountSegmentButton")
+            button.setCheckable(True)
+            self.max_ball_count_group.addButton(button, count)
+            self.max_ball_count_buttons[count] = button
+            segment_layout.addWidget(button)
+        self.max_ball_count_buttons[self.max_ball_count].setChecked(True)
+        self.max_ball_count_group.buttonClicked[int].connect(
+            self._on_max_ball_count_changed
+        )
+
+        layout.addWidget(label)
+        layout.addStretch()
+        layout.addWidget(segment)
+        return setting_row
+
+    def _on_max_ball_count_changed(self, count):
+        self.max_ball_count = count
 
     def _create_preview_card(self, parent_layout, title_text, empty_text):
         preview_card = QFrame()

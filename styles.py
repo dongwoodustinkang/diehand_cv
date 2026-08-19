@@ -19,6 +19,19 @@ APP_STYLESHEET = """
     QLabel#cardTitle, QLabel#sectionTitle {
         color: #333D4B; font-size: 15px; font-weight: 700;
     }
+    QFrame#settingRow {
+        background: #F7F8FA; border: 1px solid #E5E8EB; border-radius: 10px;
+    }
+    QLabel#controlLabel { color: #4E5968; font-size: 13px; font-weight: 600; }
+    QFrame#ballCountSegment {
+        background: #E5E8EB; border-radius: 8px;
+    }
+    QPushButton#ballCountSegmentButton {
+        background: transparent; border: 0; border-radius: 6px; color: #6B7684;
+        font-size: 13px; font-weight: 700; min-height: 28px; min-width: 30px; padding: 0 5px;
+    }
+    QPushButton#ballCountSegmentButton:hover { color: #3182F6; }
+    QPushButton#ballCountSegmentButton:checked { background: #FFFFFF; color: #3182F6; }
     QLabel#imagePreview {
         background: #F9FAFB; border: 1px solid #E5E8EB; border-radius: 12px;
         color: #8B95A1; padding: 20px;

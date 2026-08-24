@@ -8,33 +8,30 @@ import numpy as np
 MIN_CONTOUR_AREA = 3500
 MAX_CONTOUR_AREA = 10000
 
-# 샘플링 개수 설정
+# 기존 균등 샘플 수 (CONTACT_POINT_MODE = "sampled"일 때만 사용)
 TOP_BOTTOM_SAMPLE_COUNT = 15
 LEFT_RIGHT_SAMPLE_COUNT = 5
+CONTACT_POINT_MODE = "full"  # "full"이면 전체 접점 분포, "sampled"면 기존 15/5 샘플
+TOP_DENSE_BAND_TOLERANCE = 1
 
 # 점(원)의 크기 조절
-POINT_RADIUS = 1
-EXTREME_POINT_RADIUS = 3
-SECONDARY_POINT_RADIUS = 3
-LINE_THICKNESS = 1        # 확장 직선 두께
+REFERENCE_POINT_RADIUS = 2
+REFERENCE_POINT_MIN_DISTANCE = 30  # 실제 보조 접점과의 최소 거리(px)
 EXTREME_SENCODARY_DIFF = 2
 MIN_DISTANCE = 30
 APPROX_POLYGON_EPSILON_RATIO = 0.02
-PREVIEW_MASK_MODE = "approx_polygon"
+ANALYSIS_PREVIEW_MASK_MODE = "contour"
+SOURCE_PREVIEW_MASK_MODE = "line_quadrilateral"
+SOURCE_PREVIEW_OUTER_MARGIN = 1
 # "contour", "approx_polygon", 또는 "line_quadrilateral"
-LINE_QUADRILATERAL_METHOD = "robust_contacts"
-# "robust_contacts" 또는 이전 방식인 "extreme_pairs"
+LINE_QUADRILATERAL_METHOD = "primary_axis"
+# "primary_axis", "robust_contacts" 또는 이전 방식인 "extreme_pairs"
 
-CONTOUR_COLOR = (0, 255, 0)
-TOP_COLOR = (255, 0, 0)
+CONTOUR_COLOR = (247, 85, 168)  # 보라색 (BGR)
+TOP_COLOR = (248, 189, 56)  # 하늘색 (BGR)
 BOTTOM_COLOR = (0, 0, 255)
-LEFT_COLOR = (255, 0, 255)
+LEFT_COLOR = (0, 255, 0)
 RIGHT_COLOR = (0, 255, 255)
-
-# 시각화 색상 설정
-EXTREME_POINT_COLOR = (0, 255, 255)         # 절대 극단점 (노란색)
-SECONDARY_POINT_COLOR = (0, 165, 255)       # 보조 극단점 (주황색)
-
 
 @dataclass
 class ContourMeasurement:
@@ -52,7 +49,7 @@ class ContourMeasurement:
     left_extreme: Tuple[int, int] = None
     right_extreme: Tuple[int, int] = None
 
-    # 2. 보조 극단점 (3px 이내, 50px 이상 떨어진 점, 4개)
+    # 2. 보조 극단점 (2px 이내, 30px 이상 떨어진 점, 4개)
     top_secondary: Tuple[int, int] = None
     bottom_secondary: Tuple[int, int] = None
     left_secondary: Tuple[int, int] = None
@@ -115,7 +112,7 @@ def find_first_contact_points(contour, image_shape):
     """
     ## 컨투어의 상하좌우 접점 찾기
     1. 컨투어를 그린다.
-    2. 상하단 15개, 좌우측 5개로 포인트를 샘플링한다. (중복점 제거 안 함)
+    2. 전체 또는 균등 샘플 위치에서 상하좌우 첫 접점을 수집한다.
     3. 각 포인트에 대해 가장 가까운 절대 극단점(4개)을 찾는다.  
     
     """
@@ -126,28 +123,39 @@ def find_first_contact_points(contour, image_shape):
     mask = np.zeros((image_height, image_width), dtype=np.uint8)
     cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED) # 그대로 컨투어 그리기
 
-    # 1. 샘플링 로직 (상·하단 15개, 좌·우측 5개)
+    # 1. 접점 수집: 전체 분포 또는 기존 균등 샘플
     top_points = []
     bottom_points = []
-    x_positions = np.linspace(x, x + width - 1, TOP_BOTTOM_SAMPLE_COUNT, dtype=int)
+    if CONTACT_POINT_MODE == "full":
+        x_positions = range(x, x + width)
+        y_positions = range(y, y + height)
+    elif CONTACT_POINT_MODE == "sampled":
+        x_positions = np.linspace(
+            x, x + width - 1, TOP_BOTTOM_SAMPLE_COUNT, dtype=int
+        )
+        y_positions = np.linspace(
+            y, y + height - 1, LEFT_RIGHT_SAMPLE_COUNT, dtype=int
+        )
+    else:
+        raise ValueError(f"지원하지 않는 접점 수집 방식: {CONTACT_POINT_MODE}")
+
     for point_x in x_positions:
-        y_positions = np.where(mask[:, point_x] == 255)[0]
-        if len(y_positions) == 0:
+        contact_y_positions = np.where(mask[:, point_x] == 255)[0]
+        if len(contact_y_positions) == 0:
             continue
 
-        top_points.append((int(point_x), int(y_positions[0])))
-        bottom_points.append((int(point_x), int(y_positions[-1])))
+        top_points.append((int(point_x), int(contact_y_positions[0])))
+        bottom_points.append((int(point_x), int(contact_y_positions[-1])))
 
     left_points = []
     right_points = []
-    y_positions = np.linspace(y, y + height - 1, LEFT_RIGHT_SAMPLE_COUNT, dtype=int)
     for point_y in y_positions:
-        x_positions = np.where(mask[point_y, :] == 255)[0]
-        if len(x_positions) == 0:
+        contact_x_positions = np.where(mask[point_y, :] == 255)[0]
+        if len(contact_x_positions) == 0:
             continue
 
-        left_points.append((int(x_positions[0]), int(point_y)))
-        right_points.append((int(x_positions[-1]), int(point_y)))
+        left_points.append((int(contact_x_positions[0]), int(point_y)))
+        right_points.append((int(contact_x_positions[-1]), int(point_y)))
 
     # 2. 절대 극단점 추출 로직 (기존 4개)
     pts = contour[:, 0, :]  # (N, 2) 형태의 좌표 배열
@@ -206,59 +214,6 @@ def find_first_contact_points(contour, image_shape):
     )
 
 
-def draw_extended_line(img, pt1, pt2, color, thickness=1):
-    """두 점을 지나는 직선을 이미지 경계(끝)까지 연장하여 그린다."""
-    if pt1 is None or pt2 is None:
-        return
-
-    h, w = img.shape[:2]
-    x1, y1 = pt1
-    x2, y2 = pt2
-
-    if x1 == x2 and y1 == y2:
-        return
-
-    dx = x2 - x1
-    dy = y2 - y1
-
-    t_values = []
-    if dx != 0:
-        t_values.append((0 - x1) / dx)
-        t_values.append(((w - 1) - x1) / dx)
-    if dy != 0:
-        t_values.append((0 - y1) / dy)
-        t_values.append(((h - 1) - y1) / dy)
-
-    if not t_values:
-        return
-
-    valid_points = []
-    for t in t_values:
-        x = x1 + t * dx
-        y = y1 + t * dy
-        if -0.5 <= x <= w - 0.5 and -0.5 <= y <= h - 0.5:
-            cx = int(np.clip(round(x), 0, w - 1))
-            cy = int(np.clip(round(y), 0, h - 1))
-            valid_points.append((cx, cy))
-
-    unique_pts = []
-    for p in valid_points:
-        if p not in unique_pts:
-            unique_pts.append(p)
-
-    if len(unique_pts) >= 2:
-        max_dist = 0
-        p_a, p_b = unique_pts[0], unique_pts[1]
-        for i in range(len(unique_pts)):
-            for j in range(i + 1, len(unique_pts)):
-                dist = (unique_pts[i][0] - unique_pts[j][0])**2 + (unique_pts[i][1] - unique_pts[j][1])**2
-                if dist > max_dist:
-                    max_dist = dist
-                    p_a = unique_pts[i]
-                    p_b = unique_pts[j]
-        cv2.line(img, p_a, p_b, color, thickness)
-
-
 def stack_preview_tiles(tiles):
     """여러 BGRA Preview 타일을 투명한 세로 Preview로 합친다."""
 
@@ -308,7 +263,85 @@ def get_line_intersection(first_start, first_end, second_start, second_end):
     return tuple(np.rint(first_start + distance * first_direction).astype(int))
 
 
-def fit_line_from_contact_points(points, orientation):
+def get_densest_band_points(points, coordinate_index, tolerance):
+    """최빈 좌표 주변의 가장 밀집한 점 띠를 반환한다."""
+
+    samples = np.asarray(points, dtype=np.float32)
+    if len(samples) < 2:
+        return samples
+
+    coordinates = np.rint(samples[:, coordinate_index]).astype(int)
+    values, counts = np.unique(coordinates, return_counts=True)
+    most_frequent_values = values[counts == counts.max()]
+    median = np.median(coordinates)
+    center = most_frequent_values[
+        np.argmin(np.abs(most_frequent_values - median))
+    ]
+    return samples[np.abs(coordinates - center) <= tolerance]
+
+
+def get_primary_contact_reference_point(points, coordinate_index, use_minimum):
+    """첫 접점 중 가장 먼저 닿는 최솟값 또는 최댓값의 실제 대표점을 고른다."""
+
+    if not points:
+        return None
+
+    coordinates = [point[coordinate_index] for point in points]
+    coordinate = min(coordinates) if use_minimum else max(coordinates)
+    candidates = [
+        point for point in points if point[coordinate_index] == coordinate
+    ]
+    other_coordinate_index = 1 - coordinate_index
+    median = np.median([point[other_coordinate_index] for point in candidates])
+    return min(
+        candidates,
+        key=lambda point: (
+            abs(point[other_coordinate_index] - median),
+            point[other_coordinate_index],
+        ),
+    )
+
+
+def draw_axis_aligned_reference_line(img, point, coordinate_index, color, thickness=1):
+    """상·하는 수평선, 좌·우는 수직선을 대표점에서 이미지 끝까지 그린다."""
+
+    if point is None:
+        return
+
+    image_height, image_width = img.shape[:2]
+    x, y = point
+    if coordinate_index == 1:
+        cv2.line(img, (0, y), (image_width - 1, y), color, thickness)
+    else:
+        cv2.line(img, (x, 0), (x, image_height - 1), color, thickness)
+
+
+def get_spaced_reference_point(points, reference_point, coordinate_index, min_distance):
+    """같은 기준 좌표에서 충분히 떨어진 실제 첫 접점 하나를 반환한다."""
+
+    if reference_point is None:
+        return None
+
+    other_coordinate_index = 1 - coordinate_index
+    candidates = [
+        point
+        for point in points
+        if point[coordinate_index] == reference_point[coordinate_index]
+        and abs(point[other_coordinate_index] - reference_point[other_coordinate_index])
+        >= min_distance
+    ]
+    if not candidates:
+        return None
+
+    return max(
+        candidates,
+        key=lambda point: abs(
+            point[other_coordinate_index] - reference_point[other_coordinate_index]
+        ),
+    )
+
+
+def fit_line_from_contact_points(points, orientation, use_densest_band=False):
     """방향별 중앙값 이상점을 제외한 접점으로 기준선을 피팅한다."""
 
     if len(points) < 2:
@@ -316,6 +349,13 @@ def fit_line_from_contact_points(points, orientation):
 
     samples = np.asarray(points, dtype=np.float32)
     coordinate_index = 1 if orientation == "horizontal" else 0
+    if use_densest_band:
+        samples = get_densest_band_points(
+            samples, coordinate_index, TOP_DENSE_BAND_TOLERANCE
+        )
+        if len(samples) < 2:
+            return None
+
     coordinate_values = samples[:, coordinate_index]
     median = np.median(coordinate_values)
     median_absolute_deviation = np.median(np.abs(coordinate_values - median))
@@ -349,11 +389,49 @@ def get_robust_contact_lines(measurement):
     """상·하·좌·우 접점 집합으로 피팅한 네 기준선을 반환한다."""
 
     return (
-        fit_line_from_contact_points(measurement.top_points, "horizontal"),
+        fit_line_from_contact_points(
+            measurement.top_points, "horizontal", use_densest_band=True
+        ),
         fit_line_from_contact_points(measurement.bottom_points, "horizontal"),
         fit_line_from_contact_points(measurement.left_points, "vertical"),
         fit_line_from_contact_points(measurement.right_points, "vertical"),
     )
+
+
+def get_primary_axis_quadrilateral(measurement):
+    """B 이미지의 대표 수평·수직 기준선 교점으로 만든 축 정렬 사각형을 반환한다."""
+
+    top_point = get_primary_contact_reference_point(
+        measurement.top_points, 1, use_minimum=True
+    )
+    bottom_point = get_primary_contact_reference_point(
+        measurement.bottom_points, 1, use_minimum=False
+    )
+    left_point = get_primary_contact_reference_point(
+        measurement.left_points, 0, use_minimum=True
+    )
+    right_point = get_primary_contact_reference_point(
+        measurement.right_points, 0, use_minimum=False
+    )
+    if any(point is None for point in (top_point, bottom_point, left_point, right_point)):
+        return None
+
+    top_y = top_point[1]
+    bottom_y = bottom_point[1]
+    left_x = left_point[0]
+    right_x = right_point[0]
+    if top_y >= bottom_y or left_x >= right_x:
+        return None
+
+    return np.asarray(
+        (
+            (left_x, top_y),
+            (right_x, top_y),
+            (right_x, bottom_y),
+            (left_x, bottom_y),
+        ),
+        dtype=np.int32,
+    ).reshape(-1, 1, 2)
 
 
 def is_valid_line_quadrilateral(corners, measurement):
@@ -381,6 +459,8 @@ def is_valid_line_quadrilateral(corners, measurement):
 def get_line_quadrilateral(measurement):
     """상·하·좌·우 기준선의 교점 네 개를 시계 방향으로 반환한다."""
 
+    if LINE_QUADRILATERAL_METHOD == "primary_axis":
+        return get_primary_axis_quadrilateral(measurement)
     if LINE_QUADRILATERAL_METHOD == "robust_contacts":
         lines = get_robust_contact_lines(measurement)
     elif LINE_QUADRILATERAL_METHOD == "extreme_pairs":
@@ -410,16 +490,47 @@ def get_line_quadrilateral(measurement):
     return np.asarray(corners, dtype=np.int32).reshape(-1, 1, 2)
 
 
-def get_preview_mask_shape(contour, measurement):
-    """현재 설정에 맞는 Preview 마스크 도형을 반환한다."""
-    if PREVIEW_MASK_MODE == "contour":
+def expand_quadrilateral_by_side(polygon, margin):
+    """사각형의 상·하·좌·우 변을 좌표축 방향으로 바깥쪽 확장한다."""
+
+    if margin <= 0:
+        return polygon
+
+    points = polygon[:, 0, :].astype(float)
+    if len(points) != 4:
+        return polygon
+
+    top_left, top_right, bottom_right, bottom_left = points
+    top = (top_left + (0, -margin), top_right + (0, -margin))
+    bottom = (bottom_right + (0, margin), bottom_left + (0, margin))
+    left = (bottom_left + (-margin, 0), top_left + (-margin, 0))
+    right = (top_right + (margin, 0), bottom_right + (margin, 0))
+
+    corners = (
+        get_line_intersection(*top, *left),
+        get_line_intersection(*top, *right),
+        get_line_intersection(*bottom, *right),
+        get_line_intersection(*bottom, *left),
+    )
+    if any(corner is None for corner in corners):
+        return polygon
+    return np.asarray(corners, dtype=np.int32).reshape(-1, 1, 2)
+
+
+def get_preview_mask_shape(contour, measurement, mask_mode):
+    """지정한 방식에 맞는 Preview 마스크 도형을 반환한다."""
+    if mask_mode == "contour":
         return contour
-    if PREVIEW_MASK_MODE == "approx_polygon":
+    if mask_mode == "approx_polygon":
         return approximate_contour_polygon(contour)
-    if PREVIEW_MASK_MODE == "line_quadrilateral":
+    if mask_mode == "line_quadrilateral":
         quadrilateral = get_line_quadrilateral(measurement)
-        return quadrilateral if quadrilateral is not None else contour
-    raise ValueError(f"지원하지 않는 Preview 마스크 방식: {PREVIEW_MASK_MODE}")
+        if quadrilateral is None:
+            return contour
+        return expand_quadrilateral_by_side(
+            quadrilateral, SOURCE_PREVIEW_OUTER_MARGIN
+        )
+    raise ValueError(f"지원하지 않는 Preview 마스크 방식: {mask_mode}")
 
 
 def get_polygon_crop_bounds(polygon, image_shape):
@@ -436,12 +547,12 @@ def get_polygon_crop_bounds(polygon, image_shape):
     return left, top, right, bottom
 
 
-def create_polygon_preview(image, contours, measurements):
+def create_polygon_preview(image, contours, measurements, mask_mode):
     """선택한 마스크 도형 내부의 원본 픽셀만 남긴 투명 Preview를 만든다."""
 
     tiles = []
     for contour, measurement in zip(contours, measurements):
-        polygon = get_preview_mask_shape(contour, measurement)
+        polygon = get_preview_mask_shape(contour, measurement, mask_mode)
         if polygon is None:
             continue
 
@@ -481,54 +592,62 @@ def create_detection_visualization(image_path):
         result.measurements.append(measurement)
 
     result_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) # 그레이 스케일를 컬로로 변환하여 컨투어 색상이 보이게
-    cv2.drawContours(result_image, result.contours, -1, CONTOUR_COLOR, 1) # 컨투어 그리기 
+    cv2.drawContours(result_image, result.contours, -1, CONTOUR_COLOR, 1)
 
     for measurement in result.measurements:
-        # 1. 상·하·좌·우 두 점 연결 직선 그리기 (이미지 끝까지 연장)
-        draw_extended_line(result_image, measurement.top_extreme, measurement.top_secondary, TOP_COLOR, LINE_THICKNESS)
-        draw_extended_line(result_image, measurement.bottom_extreme, measurement.bottom_secondary, BOTTOM_COLOR, LINE_THICKNESS)
-        draw_extended_line(result_image, measurement.left_extreme, measurement.left_secondary, LEFT_COLOR, LINE_THICKNESS)
-        draw_extended_line(result_image, measurement.right_extreme, measurement.right_secondary, RIGHT_COLOR, LINE_THICKNESS)
-
-        # 2. 샘플 점들 그리기
+        # 방향별 첫 접점 분포의 대표점과 축 기준선만 방향색으로 표시한다.
         point_groups = [
-            (measurement.top_points, TOP_COLOR),
-            (measurement.bottom_points, BOTTOM_COLOR),
-            (measurement.left_points, LEFT_COLOR),
-            (measurement.right_points, RIGHT_COLOR),
+            (measurement.top_points, TOP_COLOR, 1, True),
+            (measurement.bottom_points, BOTTOM_COLOR, 1, False),
+            (measurement.left_points, LEFT_COLOR, 0, True),
+            (measurement.right_points, RIGHT_COLOR, 0, False),
         ]
-        for points, color in point_groups:
-            for point in points:
-                cv2.circle(result_image, point, POINT_RADIUS, color, thickness=cv2.FILLED)
-
-        # 3. 절대 극단점 그리기 (노란색)
-        extreme_points = [
-            measurement.top_extreme,
-            measurement.bottom_extreme,
-            measurement.left_extreme,
-            measurement.right_extreme,
-        ]
-        for ex_point in extreme_points:
-            if ex_point is not None:
-                cv2.circle(result_image, ex_point, EXTREME_POINT_RADIUS, EXTREME_POINT_COLOR, thickness=cv2.FILLED)
-                cv2.circle(result_image, ex_point, EXTREME_POINT_RADIUS + 1, (0, 0, 0), thickness=1)
-
-        # 4. 보조 극단점 그리기 (주황색)
-        secondary_points = [
-            measurement.top_secondary,
-            measurement.bottom_secondary,
-            measurement.left_secondary,
-            measurement.right_secondary,
-        ]
-        for sec_point in secondary_points:
-            if sec_point is not None:
-                cv2.circle(result_image, sec_point, SECONDARY_POINT_RADIUS, SECONDARY_POINT_COLOR, thickness=cv2.FILLED)
-                cv2.circle(result_image, sec_point, SECONDARY_POINT_RADIUS + 1, (0, 0, 0), thickness=1)
+        for points, color, coordinate_index, use_minimum in point_groups:
+            reference_point = get_primary_contact_reference_point(
+                points, coordinate_index, use_minimum
+            )
+            if reference_point is not None:
+                draw_axis_aligned_reference_line(
+                    result_image,
+                    reference_point,
+                    coordinate_index,
+                    color,
+                )
+                display_points = [reference_point]
+                spaced_point = get_spaced_reference_point(
+                    points,
+                    reference_point,
+                    coordinate_index,
+                    REFERENCE_POINT_MIN_DISTANCE,
+                )
+                if spaced_point is not None:
+                    display_points.append(spaced_point)
+                for display_point in display_points:
+                    cv2.circle(
+                        result_image,
+                        display_point,
+                        REFERENCE_POINT_RADIUS,
+                        color,
+                        thickness=cv2.FILLED,
+                    )
+                    cv2.circle(
+                        result_image,
+                        display_point,
+                        REFERENCE_POINT_RADIUS + 1,
+                        (0, 0, 0),
+                        thickness=1,
+                    )
 
     result.analysis_preview = create_polygon_preview(
-        image_b, result.contours, result.measurements
+        image_b,
+        result.contours,
+        result.measurements,
+        ANALYSIS_PREVIEW_MASK_MODE,
     )
     result.source_preview = create_polygon_preview(
-        image_a, result.contours, result.measurements
+        image_a,
+        result.contours,
+        result.measurements,
+        SOURCE_PREVIEW_MASK_MODE,
     )
     return result_image, result

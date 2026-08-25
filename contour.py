@@ -13,6 +13,7 @@ TOP_BOTTOM_SAMPLE_COUNT = 15
 LEFT_RIGHT_SAMPLE_COUNT = 5
 CONTACT_POINT_MODE = "full"  # "full"이면 전체 접점 분포, "sampled"면 기존 15/5 샘플
 TOP_DENSE_BAND_TOLERANCE = 1
+MAX_COUNT_RATIO = 0.5  # 최빈 접점 수를 기준으로 삼을 비율
 
 # 점(원)의 크기 조절
 REFERENCE_POINT_RADIUS = 2
@@ -22,7 +23,7 @@ MIN_DISTANCE = 30
 APPROX_POLYGON_EPSILON_RATIO = 0.02
 ANALYSIS_PREVIEW_MASK_MODE = "contour"
 SOURCE_PREVIEW_MASK_MODE = "line_quadrilateral"
-SOURCE_PREVIEW_OUTER_MARGIN = 1
+SOURCE_PREVIEW_OUTER_MARGIN = 0
 SOURCE_PREVIEW_TOP_SCAN_HEIGHT = 3
 SOURCE_PREVIEW_EDGE_CHANGE_THRESHOLD = 40
 SOURCE_PREVIEW_EDGE_CHANGE_WINDOW = 3
@@ -39,6 +40,7 @@ LEFT_COLOR = (0, 255, 0)
 RIGHT_COLOR = (0, 255, 255)
 PILLAR_DOWNWARD_POINT_COLOR = (0, 0, 255)
 PILLAR_POINT_RADIUS = 4
+MERGE_CUT_POINT_COLOR = (0, 255, 255)  # 노란색 (BGR)
 
 @dataclass
 class ContourMeasurement:
@@ -136,7 +138,7 @@ def find_first_contact_points(contour, image_shape):
         [contour],
         -1,
         255,
-        thickness=1,
+        thickness=0,
         lineType=cv2.LINE_8,
     )
 
@@ -711,6 +713,66 @@ def create_polygon_preview(image, contours, measurements, mask_mode):
     return stack_preview_tiles(tiles)
 
 
+def get_top_merge_cut_coordinate(measurements):
+    """상면 최빈·병합 후보 중 가장 큰 y 좌표를 반환한다."""
+    coordinates = [
+        point[1]
+        for measurement in measurements
+        for point in measurement.top_points
+    ]
+    if not coordinates:
+        return None
+
+    values, counts = np.unique(coordinates, return_counts=True)
+    max_count = int(max(counts))
+    ratio_count = max_count * MAX_COUNT_RATIO
+    peak_coordinates = values[counts == max_count]
+    count_by_coordinate = dict(zip(values, counts))
+    merge_coordinates = set()
+
+    for peak_coordinate in peak_coordinates:
+        peak_coordinate = int(peak_coordinate)
+        for direction in (-1, 1):
+            adjacent_coordinate = peak_coordinate + direction
+            if int(count_by_coordinate.get(adjacent_coordinate, 0)) <= ratio_count:
+                continue
+
+            merge_coordinates.add(adjacent_coordinate)
+            next_coordinate = adjacent_coordinate + direction
+            if int(count_by_coordinate.get(next_coordinate, 0)) >= ratio_count:
+                merge_coordinates.add(next_coordinate)
+
+    return max({*(int(value) for value in peak_coordinates), *merge_coordinates})
+
+
+def draw_top_merge_cut_points(image, measurements, cut_y):
+    """A 페이지 기준선 교점 사각형의 가로 중앙에 상판 Merge 점을 표시한다."""
+    if cut_y is None:
+        return
+
+    for measurement in measurements:
+        quadrilateral = get_line_quadrilateral(measurement)
+        if quadrilateral is None:
+            continue
+
+        corners = quadrilateral[:, 0, :]
+        minimum_y, maximum_y = corners[:, 1].min(), corners[:, 1].max()
+        if not minimum_y <= cut_y <= maximum_y:
+            continue
+
+        center_x = round((corners[:, 0].min() + corners[:, 0].max()) / 2)
+        image_height, image_width = image.shape[:2]
+        if 0 <= cut_y < image_height and 0 <= center_x < image_width:
+            cv2.circle(
+                image,
+                (center_x, cut_y),
+                radius=1,
+                color=MERGE_CUT_POINT_COLOR,
+                thickness=cv2.FILLED,
+                lineType=cv2.LINE_8,
+            )
+
+
 def create_detection_visualization(image_path):
     """B 분석선과 동일 좌표의 A 페이지 Crop 미리보기를 만든다."""
 
@@ -778,6 +840,12 @@ def create_detection_visualization(image_path):
                     )
 
     result.source_visualization = to_bgr(image_a)
+    source_preview_image = to_bgr(image_a)
+    draw_top_merge_cut_points(
+        source_preview_image,
+        result.measurements,
+        get_top_merge_cut_coordinate(result.measurements),
+    )
     result.analysis_preview = create_polygon_preview(
         image_b,
         result.contours,
@@ -785,7 +853,7 @@ def create_detection_visualization(image_path):
         ANALYSIS_PREVIEW_MASK_MODE,
     )
     result.source_preview = create_polygon_preview(
-        image_a,
+        source_preview_image,
         result.contours,
         result.measurements,
         SOURCE_PREVIEW_MASK_MODE,

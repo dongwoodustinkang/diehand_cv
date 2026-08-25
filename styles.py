@@ -53,6 +53,14 @@ APP_STYLESHEET = """
     }
     QPushButton#ballCountSegmentButton:hover { color: #3182F6; }
     QPushButton#ballCountSegmentButton:checked { background: #FFFFFF; color: #3182F6; }
+    QPushButton#sideCuttingSwitch {
+        background: #D1D6DB; border: 0; border-radius: 14px; color: #6B7684;
+        font-size: 11px; font-weight: 700; min-height: 28px; min-width: 48px;
+        max-height: 28px; max-width: 48px; padding: 0;
+    }
+    QPushButton#sideCuttingSwitch:checked { background: #3182F6; color: #FFFFFF; }
+    QPushButton#sideCuttingSwitch:hover { background: #B0B8C1; }
+    QPushButton#sideCuttingSwitch:checked:hover { background: #2272EB; }
     QLabel#imagePreview {
         background: #F9FAFB; border: 1px solid #E5E8EB; border-radius: 12px;
         color: #8B95A1; padding: 14px;

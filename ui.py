@@ -398,6 +398,7 @@ class MainWindow(QMainWindow):
         self.current_histogram_side = "top"
         self.histogram_measurements = []
         self.program_log_lines = []
+        self.side_cutting_enabled = False
         self.capture_session_dir = None
         self.capture_btn = QPushButton()
         self.capture_btn.setObjectName("captureIconButton")
@@ -615,6 +616,7 @@ class MainWindow(QMainWindow):
             "탐지 유형", "측면 컨투어"
         ))
         controls_layout.addWidget(self._create_ball_count_control())
+        controls_layout.addWidget(self._create_side_cutting_toggle())
         controls_layout.addWidget(self._create_divider())
         controls_layout.addStretch(1)
 
@@ -707,6 +709,33 @@ class MainWindow(QMainWindow):
 
     def _on_max_ball_count_changed(self, count):
         self.max_ball_count = count
+
+    def _create_side_cutting_toggle(self):
+        """A 페이지의 측면 커팅 표시를 켜고 끄는 스위치를 만든다."""
+        setting_row = QFrame()
+        setting_row.setObjectName("settingRow")
+        layout = QHBoxLayout(setting_row)
+        layout.setContentsMargins(10, 8, 8, 8)
+        layout.setSpacing(8)
+
+        label = QLabel("측면 커팅")
+        label.setObjectName("controlLabel")
+        self.side_cutting_switch = QPushButton("OFF")
+        self.side_cutting_switch.setObjectName("sideCuttingSwitch")
+        self.side_cutting_switch.setCheckable(True)
+        self.side_cutting_switch.setChecked(False)
+        self.side_cutting_switch.toggled.connect(self._on_side_cutting_toggled)
+
+        layout.addWidget(label)
+        layout.addStretch()
+        layout.addWidget(self.side_cutting_switch)
+        return setting_row
+
+    def _on_side_cutting_toggled(self, enabled):
+        self.side_cutting_enabled = enabled
+        self.side_cutting_switch.setText("ON" if enabled else "OFF")
+        if self.image_paths:
+            self._detect_current_image()
 
     def _create_preview_section(self, parent_layout, title_text, empty_text):
         preview_section = QWidget()
@@ -848,7 +877,9 @@ class MainWindow(QMainWindow):
         path = self.image_paths[self.current_index]
         started_at = perf_counter()
         try:
-            result_image, result = create_detection_visualization(path)
+            result_image, result = create_detection_visualization(
+                path, show_side_cutting=self.side_cutting_enabled
+            )
         except ValueError as error:
             self._clear_result("검출에 실패했습니다.")
             QMessageBox.critical(self, "검출", str(error))

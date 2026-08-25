@@ -23,6 +23,11 @@ APPROX_POLYGON_EPSILON_RATIO = 0.02
 ANALYSIS_PREVIEW_MASK_MODE = "contour"
 SOURCE_PREVIEW_MASK_MODE = "line_quadrilateral"
 SOURCE_PREVIEW_OUTER_MARGIN = 1
+SOURCE_PREVIEW_TOP_SCAN_HEIGHT = 3
+SOURCE_PREVIEW_EDGE_CHANGE_THRESHOLD = 40
+SOURCE_PREVIEW_EDGE_CHANGE_WINDOW = 3
+SOURCE_PREVIEW_COLOR_CHANGE_MIN_RUN = 3
+SOURCE_PREVIEW_INVALID_Y_DIFFERENCE = 10
 # "contour", "approx_polygon", 또는 "line_quadrilateral"
 LINE_QUADRILATERAL_METHOD = "primary_axis"
 # "primary_axis", "robust_contacts" 또는 이전 방식인 "extreme_pairs"
@@ -32,6 +37,8 @@ TOP_COLOR = (248, 189, 56)  # 하늘색 (BGR)
 BOTTOM_COLOR = (0, 0, 255)
 LEFT_COLOR = (0, 255, 0)
 RIGHT_COLOR = (0, 255, 255)
+PILLAR_DOWNWARD_POINT_COLOR = (0, 0, 255)
+PILLAR_POINT_RADIUS = 4
 
 @dataclass
 class ContourMeasurement:
@@ -64,6 +71,7 @@ class DetectionResult:
     measurements: List[ContourMeasurement] = field(default_factory=list)
     analysis_preview: Optional[np.ndarray] = None
     source_preview: Optional[np.ndarray] = None
+    source_visualization: Optional[np.ndarray] = None
 
 
 def to_grayscale(image):
@@ -120,8 +128,17 @@ def find_first_contact_points(contour, image_shape):
     image_height, image_width = image_shape
     x, y, width, height = cv2.boundingRect(contour) # 컨투어의 x,y, width, height를 구함
 
-    mask = np.zeros((image_height, image_width), dtype=np.uint8)
-    cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED) # 그대로 컨투어 그리기
+    # 채워진 내부 면적이 아니라 실제 외곽선만 사용한다. 히스토그램과 기준선은
+    # 내부 픽셀이 아닌 각 방향에서 외곽선을 처음 만나는 지점만 사용한다.
+    boundary_mask = np.zeros((image_height, image_width), dtype=np.uint8)
+    cv2.drawContours(
+        boundary_mask,
+        [contour],
+        -1,
+        255,
+        thickness=1,
+        lineType=cv2.LINE_8,
+    )
 
     # 1. 접점 수집: 전체 분포 또는 기존 균등 샘플
     top_points = []
@@ -139,18 +156,20 @@ def find_first_contact_points(contour, image_shape):
     else:
         raise ValueError(f"지원하지 않는 접점 수집 방식: {CONTACT_POINT_MODE}")
 
+
+    # 상면 하면 접점 중에
     for point_x in x_positions:
-        contact_y_positions = np.where(mask[:, point_x] == 255)[0]
-        if len(contact_y_positions) == 0:
+        contact_y_positions = np.where(boundary_mask[:, point_x] == 255)[0] # 고정된 x 좌표에 색상이 255인 y좌표의 배열
+        if len(contact_y_positions) == 0: # 만약 y좌표가 존재하지 않으면 pass
             continue
 
-        top_points.append((int(point_x), int(contact_y_positions[0])))
-        bottom_points.append((int(point_x), int(contact_y_positions[-1])))
+        top_points.append((int(point_x), int(contact_y_positions[0]))) # 가장 상위 좌표
+        bottom_points.append((int(point_x), int(contact_y_positions[-1]))) # 가장 하위 좌표
 
     left_points = []
     right_points = []
     for point_y in y_positions:
-        contact_x_positions = np.where(mask[point_y, :] == 255)[0]
+        contact_x_positions = np.where(boundary_mask[point_y, :] == 255)[0]
         if len(contact_x_positions) == 0:
             continue
 
@@ -547,6 +566,126 @@ def get_polygon_crop_bounds(polygon, image_shape):
     return left, top, right, bottom
 
 
+def find_top_pillar_reference_points(image):
+    """원본 A 페이지 상단의 큰 밝기 변화 두 지점을 찾는다."""
+
+    grayscale = to_grayscale(image)
+    image_width = image.shape[1]
+    image_height = image.shape[0]
+    if image_width < 2 or image_height < SOURCE_PREVIEW_TOP_SCAN_HEIGHT:
+        return None
+
+    # 상단 몇 줄의 중앙값으로 노이즈를 줄인 뒤, x 방향 밝기 변화가 큰 첫·마지막
+    # 지점을 각각 좌·우 기둥 경계로 사용한다.
+    top_profile = np.median(
+        grayscale[:SOURCE_PREVIEW_TOP_SCAN_HEIGHT, :], axis=0
+    )
+    # 인접 픽셀만 비교하면 완만한 경계가 누락될 수 있어, 좌·우 3 px 간격의
+    # 밝기 차이를 사용한다. 좌/우 절반에서 변화량이 가장 큰 점이 기둥 경계다.
+    edge_window = SOURCE_PREVIEW_EDGE_CHANGE_WINDOW
+    if image_width <= edge_window * 2:
+        return None
+    horizontal_changes = np.zeros(image_width, dtype=np.float32)
+    horizontal_changes[edge_window:-edge_window] = np.abs(
+        top_profile[edge_window * 2 :] - top_profile[: -edge_window * 2]
+    )
+    midpoint_x = image_width // 2
+    left_x = int(np.argmax(horizontal_changes[:midpoint_x]))
+    right_x = int(midpoint_x + np.argmax(horizontal_changes[midpoint_x:]))
+    if (
+        horizontal_changes[left_x] < SOURCE_PREVIEW_EDGE_CHANGE_THRESHOLD
+        or horizontal_changes[right_x] < SOURCE_PREVIEW_EDGE_CHANGE_THRESHOLD
+    ):
+        return None
+    if left_x >= right_x:
+        return None
+
+    point_y = PILLAR_POINT_RADIUS
+    return (
+        (max(0, left_x - 5), point_y),
+        (min(image_width - 1, right_x + 5), point_y),
+    )
+
+
+def find_downward_color_change_points(image, reference_points):
+    """두 기준점의 y 차이가 허용 범위인 아래 방향 변화점 쌍을 찾는다."""
+
+    if reference_points is None:
+        return ()
+
+    grayscale = to_grayscale(image)
+    candidate_points = []
+    for point_x, point_y in reference_points:
+        vertical_profile = grayscale[point_y:, point_x].astype(np.int16)
+        reference_brightness = vertical_profile[0]
+        color_changed = np.abs(
+            vertical_profile - reference_brightness
+        ) >= SOURCE_PREVIEW_EDGE_CHANGE_THRESHOLD
+        persistent_change = np.convolve(
+            color_changed.astype(np.int16),
+            np.ones(SOURCE_PREVIEW_COLOR_CHANGE_MIN_RUN, dtype=np.int16),
+            mode="valid",
+        ) >= SOURCE_PREVIEW_COLOR_CHANGE_MIN_RUN
+        transition_y = np.flatnonzero(persistent_change)
+        if len(transition_y) == 0:
+            return ()
+
+        # 같은 색 변화 구간에서 연속으로 나온 y는 첫 지점 하나만 남긴다.
+        transition_starts = transition_y[
+            np.r_[True, np.diff(transition_y) > 1]
+        ]
+        candidate_points.append(
+            [(point_x, int(point_y + candidate_y)) for candidate_y in transition_starts]
+        )
+
+    if len(candidate_points) != 2:
+        return ()
+
+    valid_pairs = [
+        (left_point, right_point)
+        for left_point in candidate_points[0]
+        for right_point in candidate_points[1]
+        if abs(left_point[1] - right_point[1])
+        < SOURCE_PREVIEW_INVALID_Y_DIFFERENCE
+    ]
+    if not valid_pairs:
+        return ()
+
+    # 가장 위에서 처음 만나는, y 차이가 가장 작은 쌍을 선택한다.
+    return tuple(
+        min(
+            valid_pairs,
+            key=lambda pair: (
+                max(pair[0][1], pair[1][1]),
+                abs(pair[0][1] - pair[1][1]),
+            ),
+        )
+    )
+
+
+def draw_top_pillar_reference_points(
+    image, reference_points, downward_points=()
+):
+    """원본 A 페이지에 아래 방향 변화점 기준 수평선만 표시한다."""
+
+    preview = to_bgr(image)
+    if reference_points is None:
+        return preview
+
+    if len(downward_points) == 2:
+        left_point, right_point = sorted(downward_points, key=lambda point: point[0])
+        line_y = round((left_point[1] + right_point[1]) / 2)
+        cv2.line(
+            preview,
+            (left_point[0], line_y),
+            (right_point[0], line_y),
+            PILLAR_DOWNWARD_POINT_COLOR,
+            thickness=1,
+            lineType=cv2.LINE_AA,
+        )
+    return preview
+
+
 def create_polygon_preview(image, contours, measurements, mask_mode):
     """선택한 마스크 도형 내부의 원본 픽셀만 남긴 투명 Preview를 만든다."""
 
@@ -638,6 +777,7 @@ def create_detection_visualization(image_path):
                         thickness=1,
                     )
 
+    result.source_visualization = to_bgr(image_a)
     result.analysis_preview = create_polygon_preview(
         image_b,
         result.contours,

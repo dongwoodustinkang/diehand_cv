@@ -25,6 +25,17 @@ APP_STYLESHEET = """
     QLabel#previewTitle {
         color: #4E5968; font-size: 13px; font-weight: 700; padding-left: 2px;
     }
+    QLabel#histogramCount {
+        color: #191F28; font-size: 12px; font-weight: 400;
+        background: transparent; padding: 0;
+    }
+    QPushButton#histogramSideButton {
+        background: #F2F4F6; border: 0; border-radius: 7px; color: #6B7684;
+        font-size: 12px; font-weight: 700; min-height: 26px; min-width: 26px;
+        padding: 0;
+    }
+    QPushButton#histogramSideButton:hover { color: #3182F6; }
+    QPushButton#histogramSideButton:checked { background: #3182F6; color: #FFFFFF; }
     QFrame#settingRow {
         background: #F7F8FA; border: 1px solid #E5E8EB; border-radius: 10px;
     }

@@ -3,8 +3,9 @@ from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 
+import numpy as np
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QButtonGroup,
     QDialog,
@@ -32,8 +33,8 @@ from styles import APP_STYLESHEET
 IMAGE_EXTS = {".tif", ".tiff"}
 DEFAULT_DIR = "dataset/"
 PREVIEW_SCALE = 0.8
-DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand_cv/dataset/side/total")
-# DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand")
+# DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand_cv/dataset/side/total")
+DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand")
 CAPTURE_ROOT = Path(__file__).resolve().parent / "captures"
 
 class ClickableImageLabel(QLabel):
@@ -47,6 +48,99 @@ class ClickableImageLabel(QLabel):
             event.accept()
             return
         super().mousePressEvent(event)
+
+
+class TopContourHistogram(QWidget):
+    """상면 컨투어에 처음 닿는 y 좌표의 분포를 표시한다."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.coordinates = []
+        self.coordinate_axis = "y"
+        self.coordinate_range = None
+        self.setObjectName("topContourHistogram")
+        self.setMinimumHeight(148)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def set_coordinates(
+        self, coordinates, coordinate_axis="y", coordinate_range=None
+    ):
+        self.coordinates = [int(coordinate) for coordinate in coordinates]
+        self.coordinate_axis = coordinate_axis
+        self.coordinate_range = coordinate_range
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(12, 10, -12, -10)
+
+        if not self.coordinates:
+            painter.setPen(QColor("#8B95A1"))
+            painter.drawText(rect, Qt.AlignCenter, "상면 컨투어 접점 좌표가 없습니다.")
+            return
+
+        if self.coordinate_range is None:
+            minimum, maximum = min(self.coordinates), max(self.coordinates)
+        else:
+            minimum, maximum = self.coordinate_range
+
+        if minimum >= maximum:
+            counts = [len(self.coordinates)]
+        else:
+            counts, _ = np.histogram(
+                self.coordinates,
+                # 기준선 내 각 정수 좌표를 하나의 독립적인 막대로 표시한다.
+                # 넓은 기준선 범위를 임의 구간으로 합치면 서로 다른 첫 접점이
+                # 하나의 막대에 합산되어 분포가 왜곡될 수 있다.
+                bins=maximum - minimum + 1,
+                range=(minimum, maximum + 1),
+            )
+
+        left = rect.left() + 30
+        top = rect.top() + 8
+        right = rect.right() - 4
+        bottom = rect.bottom() - 24
+        chart_width, chart_height = right - left, bottom - top
+        if chart_width <= 0 or chart_height <= 0:
+            return
+
+        total_coordinate_count = len(self.coordinates)
+        painter.setPen(QPen(QColor("#DDE3EA"), 1))
+        painter.drawLine(left, bottom, right, bottom)
+        painter.drawLine(left, top, left, bottom)
+
+        bin_width = chart_width / len(counts)
+        for index, count in enumerate(counts):
+            bar_height = chart_height * int(count) / total_coordinate_count
+            bar_left = left + index * bin_width + 1
+            bar_width = max(1, bin_width - 2)
+            painter.fillRect(
+                int(round(bar_left)),
+                int(round(bottom - bar_height)),
+                int(round(bar_width)),
+                int(round(bar_height)),
+                QColor("#3182F6"),
+            )
+
+        painter.setPen(QColor("#6B7684"))
+        painter.drawText(
+            0, top - 1, left - 5, 16,
+            Qt.AlignRight | Qt.AlignVCenter, str(total_coordinate_count),
+        )
+        painter.drawText(
+            0, bottom - 8, left - 5, 16, Qt.AlignRight | Qt.AlignVCenter, "0"
+        )
+        painter.drawText(
+            left, bottom + 7, 72, 16,
+            Qt.AlignLeft | Qt.AlignVCenter, f"{self.coordinate_axis}={minimum}"
+        )
+        painter.drawText(
+            right - 72, bottom + 7, 72, 16,
+            Qt.AlignRight | Qt.AlignVCenter, f"{self.coordinate_axis}={maximum}",
+        )
+        painter.end()
 
 
 class ImageModal(QDialog):
@@ -181,6 +275,8 @@ class MainWindow(QMainWindow):
         self.result_pixmap = QPixmap() # B 페이지 이미지
         self.analysis_preview_pixmap = QPixmap()
         self.source_preview_pixmap = QPixmap()
+        self.current_histogram_side = "top"
+        self.histogram_measurements = []
         self.capture_session_dir = None
         self.capture_btn = QPushButton()
         self.capture_btn.setObjectName("captureIconButton")
@@ -339,6 +435,37 @@ class MainWindow(QMainWindow):
             "A 페이지 기준선 교점 사각형",
             "네 기준선 교점 형태를 유지한 A 페이지 영역이 표시됩니다.",
         )
+        histogram_header = QHBoxLayout()
+        histogram_header.setContentsMargins(0, 0, 0, 0)
+        self.histogram_title = QLabel("상면 외곽 컨투어 첫 접점 y 좌표 분포")
+        self.histogram_title.setObjectName("previewTitle")
+        self.top_contour_count_label = QLabel("전체 0개")
+        self.top_contour_count_label.setObjectName("histogramCount")
+        histogram_header.addWidget(self.histogram_title)
+        histogram_header.addStretch()
+        self.histogram_side_group = QButtonGroup(self)
+        self.histogram_side_group.setExclusive(True)
+        self.histogram_side_buttons = {}
+        for side_key, label_text in (
+            ("top", "상"),
+            ("bottom", "하"),
+            ("left", "좌"),
+            ("right", "우"),
+        ):
+            button = QPushButton(label_text)
+            button.setObjectName("histogramSideButton")
+            button.setCheckable(True)
+            self.histogram_side_group.addButton(button)
+            self.histogram_side_buttons[side_key] = button
+            histogram_header.addWidget(button)
+        self.histogram_side_buttons[self.current_histogram_side].setChecked(True)
+        self.histogram_side_group.buttonClicked.connect(
+            self._on_histogram_side_changed
+        )
+        histogram_header.addWidget(self.top_contour_count_label)
+        layout.addLayout(histogram_header)
+        self.top_contour_histogram = TopContourHistogram()
+        layout.addWidget(self.top_contour_histogram)
         self.analysis_preview_label.clicked.connect(
             lambda: self._show_image_modal(
                 self.analysis_preview_pixmap, "B 페이지 컨투어"
@@ -608,14 +735,22 @@ class MainWindow(QMainWindow):
 
         elapsed_seconds = perf_counter() - started_at
         images_per_second = 1 / max(elapsed_seconds, 0.000001)
+        self._show_original_image(result.source_visualization)
         self._show_result_image(result_image)
         self._show_analysis_preview(result.analysis_preview)
         self._show_source_preview(result.source_preview)
+        self._show_top_contour_histogram(result.measurements)
         self._update_info_label(path, result, elapsed_seconds, images_per_second)
 
     def _show_result_image(self, bgr_image):
         self.result_pixmap = self._pixmap_from_image(bgr_image)
         self._set_scaled_pixmap(self.result_label, self.result_pixmap)
+
+    def _show_original_image(self, bgr_image):
+        if bgr_image is None or bgr_image.size == 0:
+            return
+        self.original_pixmap = self._pixmap_from_image(bgr_image)
+        self._set_scaled_pixmap(self.image_label, self.original_pixmap)
 
     def _show_analysis_preview(self, bgr_image):
         if bgr_image is None or bgr_image.size == 0:
@@ -644,6 +779,70 @@ class MainWindow(QMainWindow):
             self.source_preview_pixmap,
             preview_scale=PREVIEW_SCALE,
         )
+
+    def _on_histogram_side_changed(self, button):
+        self.current_histogram_side = next(
+            side_key
+            for side_key, side_button in self.histogram_side_buttons.items()
+            if side_button is button
+        )
+        self._show_top_contour_histogram(self.histogram_measurements)
+
+    def _show_top_contour_histogram(self, measurements):
+        """선택한 면에 처음 닿는 모든 좌표의 분포를 표시한다."""
+
+        self.histogram_measurements = measurements
+        point_attribute, coordinate_index, title = {
+            "top": ("top_points", 1, "상면 외곽 컨투어 첫 접점 y 좌표 분포"),
+            "bottom": ("bottom_points", 1, "하면 외곽 컨투어 첫 접점 y 좌표 분포"),
+            "left": ("left_points", 0, "좌면 외곽 컨투어 첫 접점 x 좌표 분포"),
+            "right": ("right_points", 0, "우면 외곽 컨투어 첫 접점 x 좌표 분포"),
+        }[self.current_histogram_side]
+        coordinates = [
+            point[coordinate_index]
+            for measurement in measurements
+            for point in getattr(measurement, point_attribute)
+        ]
+        coordinate_axis = "y" if coordinate_index == 1 else "x"
+        self.top_contour_histogram.set_coordinates(
+            coordinates,
+            coordinate_axis,
+            self._get_histogram_coordinate_range(measurements, coordinate_index),
+        )
+        self.histogram_title.setText(title)
+        self.top_contour_count_label.setText(f"전체 {len(coordinates):,}개")
+
+    @staticmethod
+    def _get_histogram_coordinate_range(measurements, coordinate_index):
+        """기준선 사각형 안에서 사용할 전체 x/y 좌표 범위를 구한다."""
+
+        ranges = []
+        for measurement in measurements:
+            if coordinate_index == 1:
+                first_point = get_primary_contact_reference_point(
+                    measurement.top_points, 1, use_minimum=True
+                )
+                last_point = get_primary_contact_reference_point(
+                    measurement.bottom_points, 1, use_minimum=False
+                )
+            else:
+                first_point = get_primary_contact_reference_point(
+                    measurement.left_points, 0, use_minimum=True
+                )
+                last_point = get_primary_contact_reference_point(
+                    measurement.right_points, 0, use_minimum=False
+                )
+
+            if first_point is not None and last_point is not None:
+                ranges.append(
+                    (first_point[coordinate_index], last_point[coordinate_index])
+                )
+
+        if not ranges:
+            return None
+        minimum = min(first_coordinate for first_coordinate, _ in ranges)
+        maximum = max(last_coordinate for _, last_coordinate in ranges)
+        return (minimum, maximum) if minimum <= maximum else None
 
     @staticmethod
     def _pixmap_from_image(image):
@@ -682,6 +881,9 @@ class MainWindow(QMainWindow):
         self.source_preview_label.setText(
             "네 기준선 교점 형태를 유지한 A 페이지 영역이 표시됩니다."
         )
+        self.top_contour_histogram.set_coordinates(())
+        self.histogram_measurements = []
+        self.top_contour_count_label.setText("전체 0개")
         self.status_label.setText("분석 실패")
         self.status_label.setStyleSheet("color: #F04452;")
         self.status_detail_label.setText(message)

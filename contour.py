@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
+from PIL import Image
 
 # 검출할 컨투어의 최소/최대 크기
 MIN_CONTOUR_AREA = 3500
@@ -711,14 +712,32 @@ def create_polygon_preview(image, contours, measurements, mask_mode):
     return stack_preview_tiles(tiles)
 
 
+def load_ab_tiff_pages(image_path):
+    """A/B 다중 페이지 TIFF의 앞 두 페이지를 플랫폼과 무관하게 읽는다."""
+    try:
+        with Image.open(image_path) as tiff:
+            if getattr(tiff, "n_frames", 1) < 2:
+                raise ValueError("A/B 두 페이지 TIFF가 아닙니다.")
+
+            pages = []
+            for page_index in (0, 1):
+                tiff.seek(page_index)
+                page = np.array(tiff.copy())
+                if page.ndim not in (2, 3):
+                    raise ValueError(
+                        f"{page_index + 1}번째 페이지의 차원이 올바르지 않습니다: "
+                        f"{page.ndim}D"
+                    )
+                pages.append(page)
+            return pages
+    except (OSError, ValueError) as error:
+        raise ValueError(f"A/B 두 페이지 TIFF를 읽을 수 없습니다: {image_path}") from error
+
+
 def create_detection_visualization(image_path):
     """B 분석선과 동일 좌표의 A 페이지 Crop 미리보기를 만든다."""
 
-    success, images = cv2.imreadmulti(str(image_path), flags=cv2.IMREAD_UNCHANGED)
-    if not success or len(images) < 2:
-        raise ValueError(f"A/B 두 페이지 TIFF를 읽을 수 없습니다: {image_path}")
-
-    image_a, image_b = images[:2]
+    image_a, image_b = load_ab_tiff_pages(image_path)
     if image_a.shape[:2] != image_b.shape[:2]:
         raise ValueError(f"A/B 페이지 크기가 일치하지 않습니다: {image_path}")
 

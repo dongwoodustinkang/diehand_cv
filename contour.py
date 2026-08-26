@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
+from PIL import Image
 
 # 검출할 컨투어의 최소/최대 크기
 MIN_CONTOUR_AREA = 3500
@@ -40,6 +41,8 @@ LEFT_COLOR = (0, 255, 0)
 RIGHT_COLOR = (0, 255, 255)
 PILLAR_DOWNWARD_POINT_COLOR = (0, 0, 255)
 PILLAR_POINT_RADIUS = 4
+HISTOGRAM_PEAK_POINT_COLOR = (82, 68, 240)  # 빨간색 (#F04452, BGR)
+HISTOGRAM_MERGE_POINT_COLOR = (0, 146, 255)  # 주황색 (#FF9200, BGR)
 
 @dataclass
 class ContourMeasurement:
@@ -724,15 +727,15 @@ def create_polygon_preview(
     return stack_preview_tiles(tiles)
 
 
-def get_merge_coordinates(measurements, point_attribute):
-    """지정 면의 최빈·병합 후보 y 좌표를 반환한다."""
+def get_histogram_coordinate_groups(measurements, point_attribute):
+    """지정 면의 히스토그램 빨간색·주황색 y 좌표를 반환한다."""
     coordinates = [
         point[1]
         for measurement in measurements
         for point in getattr(measurement, point_attribute)
     ]
     if not coordinates:
-        return None
+        return set(), set()
 
     values, counts = np.unique(coordinates, return_counts=True)
     max_count = int(max(counts))
@@ -753,7 +756,16 @@ def get_merge_coordinates(measurements, point_attribute):
             if int(count_by_coordinate.get(next_coordinate, 0)) >= ratio_count:
                 merge_coordinates.add(next_coordinate)
 
-    return {*(int(value) for value in peak_coordinates), *merge_coordinates}
+    peak_coordinates = {int(value) for value in peak_coordinates}
+    return peak_coordinates, merge_coordinates - peak_coordinates
+
+
+def get_merge_coordinates(measurements, point_attribute):
+    """지정 면의 최빈·병합 후보 y 좌표를 반환한다."""
+    peak_coordinates, merge_coordinates = get_histogram_coordinate_groups(
+        measurements, point_attribute
+    )
+    return peak_coordinates | merge_coordinates
 
 
 def get_top_merge_coordinates(measurements):
@@ -773,14 +785,82 @@ def get_bottom_merge_cut_coordinate(measurements):
     return min(merge_coordinates) if merge_coordinates else None
 
 
+def draw_side_cutting_boundary_points(
+    image, measurements, point_attribute, cut_y
+):
+    """A/B 페이지 결과에 커팅 경계의 좌·우 점과 연결선을 표시한다."""
+    if cut_y is None:
+        return
+
+    peak_coordinates, merge_coordinates = get_histogram_coordinate_groups(
+        measurements, point_attribute
+    )
+    highlighted_coordinates = peak_coordinates | merge_coordinates
+    points = [
+        point
+        for measurement in measurements
+        for point in getattr(measurement, point_attribute)
+        if point[1] in highlighted_coordinates
+    ]
+    if not points:
+        return
+
+    color = (
+        HISTOGRAM_PEAK_POINT_COLOR
+        if cut_y in peak_coordinates
+        else HISTOGRAM_MERGE_POINT_COLOR
+    )
+    image_height, image_width = image.shape[:2]
+    if not 0 <= cut_y < image_height:
+        return
+
+    point_start_x = max(0, min(point[0] for point in points))
+    point_end_x = min(image_width - 1, max(point[0] for point in points))
+    cv2.line(
+        image,
+        (0, cut_y),
+        (image_width - 1, cut_y),
+        color,
+        thickness=1,
+        lineType=cv2.LINE_8,
+    )
+    for point_x in {point_start_x, point_end_x}:
+        cv2.circle(
+            image,
+            (point_x, cut_y),
+            radius=2,
+            color=color,
+            thickness=cv2.FILLED,
+            lineType=cv2.LINE_8,
+        )
+
+
+def load_ab_tiff_pages(image_path):
+    """A/B 다중 페이지 TIFF의 앞 두 페이지를 플랫폼과 무관하게 읽는다."""
+    try:
+        with Image.open(image_path) as tiff:
+            if getattr(tiff, "n_frames", 1) < 2:
+                raise ValueError("A/B 두 페이지 TIFF가 아닙니다.")
+
+            pages = []
+            for page_index in (0, 1):
+                tiff.seek(page_index)
+                page = np.array(tiff.copy())
+                if page.ndim not in (2, 3):
+                    raise ValueError(
+                        f"{page_index + 1}번째 페이지의 차원이 올바르지 않습니다: "
+                        f"{page.ndim}D"
+                    )
+                pages.append(page)
+            return pages
+    except (OSError, ValueError) as error:
+        raise ValueError(f"A/B 두 페이지 TIFF를 읽을 수 없습니다: {image_path}") from error
+
+
 def create_detection_visualization(image_path, show_side_cutting=True):
     """B 분석선과 동일 좌표의 A 페이지 Crop 미리보기를 만든다."""
 
-    success, images = cv2.imreadmulti(str(image_path), flags=cv2.IMREAD_UNCHANGED)
-    if not success or len(images) < 2:
-        raise ValueError(f"A/B 두 페이지 TIFF를 읽을 수 없습니다: {image_path}")
-
-    image_a, image_b = images[:2]
+    image_a, image_b = load_ab_tiff_pages(image_path)
     if image_a.shape[:2] != image_b.shape[:2]:
         raise ValueError(f"A/B 페이지 크기가 일치하지 않습니다: {image_path}")
 
@@ -792,60 +872,31 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         measurement = find_first_contact_points(contour, gray.shape)
         result.measurements.append(measurement)
 
-    result_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) # 그레이 스케일를 컬로로 변환하여 컨투어 색상이 보이게
-    cv2.drawContours(result_image, result.contours, -1, CONTOUR_COLOR, 1)
-
-    for measurement in result.measurements:
-        # 방향별 첫 접점 분포의 대표점과 축 기준선만 방향색으로 표시한다.
-        point_groups = [
-            (measurement.top_points, TOP_COLOR, 1, True),
-            (measurement.bottom_points, BOTTOM_COLOR, 1, False),
-            (measurement.left_points, LEFT_COLOR, 0, True),
-            (measurement.right_points, RIGHT_COLOR, 0, False),
-        ]
-        for points, color, coordinate_index, use_minimum in point_groups:
-            reference_point = get_primary_contact_reference_point(
-                points, coordinate_index, use_minimum
-            )
-            if reference_point is not None:
-                draw_axis_aligned_reference_line(
-                    result_image,
-                    reference_point,
-                    coordinate_index,
-                    color,
-                )
-                display_points = [reference_point]
-                spaced_point = get_spaced_reference_point(
-                    points,
-                    reference_point,
-                    coordinate_index,
-                    REFERENCE_POINT_MIN_DISTANCE,
-                )
-                if spaced_point is not None:
-                    display_points.append(spaced_point)
-                for display_point in display_points:
-                    cv2.circle(
-                        result_image,
-                        display_point,
-                        REFERENCE_POINT_RADIUS,
-                        color,
-                        thickness=cv2.FILLED,
-                    )
-                    cv2.circle(
-                        result_image,
-                        display_point,
-                        REFERENCE_POINT_RADIUS + 1,
-                        (0, 0, 0),
-                        thickness=1,
-                    )
-
-    result.source_visualization = to_bgr(image_a)
-    source_preview_image = to_bgr(image_a)
     top_cut_y = None
     bottom_cut_y = None
     if show_side_cutting:
         top_cut_y = get_top_merge_cut_coordinate(result.measurements)
         bottom_cut_y = get_bottom_merge_cut_coordinate(result.measurements)
+
+    result_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) # 그레이 스케일를 컬로로 변환하여 컨투어 색상이 보이게
+    if show_side_cutting:
+        draw_side_cutting_boundary_points(
+            result_image, result.measurements, "top_points", top_cut_y
+        )
+        draw_side_cutting_boundary_points(
+            result_image, result.measurements, "bottom_points", bottom_cut_y
+        )
+
+    source_visualization = to_bgr(image_a)
+    source_preview_image = to_bgr(image_a)
+    if show_side_cutting:
+        draw_side_cutting_boundary_points(
+            source_visualization, result.measurements, "top_points", top_cut_y
+        )
+        draw_side_cutting_boundary_points(
+            source_visualization, result.measurements, "bottom_points", bottom_cut_y
+        )
+    result.source_visualization = source_visualization
     result.analysis_preview = create_polygon_preview(
         image_b,
         result.contours,

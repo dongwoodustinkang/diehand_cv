@@ -601,7 +601,9 @@ class MainWindow(QMainWindow):
         preview_label.setAlignment(Qt.AlignCenter)
         preview_label.setWordWrap(True)
         preview_label.setMinimumHeight(160)
-        preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # 미리보기 Pixmap의 원본 폭이 카드의 최소 폭으로 전파되지 않게 한다.
+        # 따라서 파일마다 미리보기 크기가 달라도 세 컬럼의 폭은 유지된다.
+        preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         preview_layout.addWidget(preview_label)
         parent_layout.addWidget(preview_section, stretch=1)
         return preview_label
@@ -612,7 +614,8 @@ class MainWindow(QMainWindow):
         label.setAlignment(Qt.AlignCenter)
         label.setWordWrap(True)
         label.setMinimumHeight(300)
-        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # 이미지 자체의 크기가 레이아웃 폭을 밀어내지 않도록 가로 크기 힌트를 무시한다.
+        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         return label
 
     def _show_image_modal(self, pixmap, title):
@@ -621,26 +624,34 @@ class MainWindow(QMainWindow):
 
     # ---------------- Capture ----------------
     @staticmethod
-    def _next_capture_path(capture_dir):
-        """기존 캡처 뒤에 이어질 다섯 자리 JPG 파일 경로를 반환한다."""
+    def _next_capture_path(capture_dir, source_path):
+        """원본 파일명별 다음 캡처 순번의 JPG 파일 경로를 반환한다."""
 
+        filename = source_path.stem
+        prefix = f"{filename}_"
         sequence_numbers = [
-            int(path.stem)
-            for path in capture_dir.glob("*.jpg")
-            if path.stem.isdecimal() and len(path.stem) == 5
+            int(path.stem.removeprefix(prefix))
+            for path in capture_dir.glob(f"{filename}_*.jpg")
+            if path.stem.startswith(prefix)
+            and path.stem.removeprefix(prefix).isdecimal()
         ]
         next_sequence = max(sequence_numbers, default=0) + 1
-        return capture_dir / f"{next_sequence:05d}.jpg"
+        return capture_dir / f"{filename}_{next_sequence}.jpg"
 
     def on_capture(self):
         """현재 프로그램 화면을 실행 단위의 날짜·시간 폴더에 JPG로 저장한다."""
+
+        if not self.image_paths or self.current_index < 0:
+            QMessageBox.information(self, "캡처 저장", "먼저 TIFF 이미지를 불러오세요.")
+            return
 
         if self.capture_session_dir is None:
             timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
             self.capture_session_dir = CAPTURE_ROOT / timestamp
             self.capture_session_dir.mkdir(parents=True, exist_ok=True)
 
-        capture_path = self._next_capture_path(self.capture_session_dir)
+        source_path = self.image_paths[self.current_index]
+        capture_path = self._next_capture_path(self.capture_session_dir, source_path)
         if not self.grab().save(str(capture_path), "JPG", quality=95):
             QMessageBox.critical(self, "캡처 저장", "화면 캡처를 저장하지 못했습니다.")
             return

@@ -396,6 +396,8 @@ class MainWindow(QMainWindow):
         self.analysis_preview_pixmap = QPixmap()
         self.source_preview_pixmap = QPixmap()
         self.current_histogram_side = "top"
+        self.current_histogram_region = "all"
+        self.histogram_image_width = 0
         self.histogram_measurements = []
         self.program_log_lines = []
         self.side_cutting_enabled = False
@@ -584,6 +586,26 @@ class MainWindow(QMainWindow):
         self.histogram_side_group.buttonClicked.connect(
             self._on_histogram_side_changed
         )
+        self.histogram_region_group = QButtonGroup(self)
+        self.histogram_region_group.setExclusive(True)
+        self.histogram_region_buttons = {}
+        for region_key, label_text, tooltip in (
+            ("all", "전체", "선택한 면의 전체 분포"),
+            ("left", "좌", "선택한 상·하면의 좌측 분포"),
+            ("right", "우", "선택한 상·하면의 우측 분포"),
+        ):
+            button = QPushButton(label_text)
+            button.setObjectName("histogramSideButton")
+            button.setCheckable(True)
+            button.setToolTip(tooltip)
+            self.histogram_region_group.addButton(button)
+            self.histogram_region_buttons[region_key] = button
+            histogram_header.addWidget(button)
+        self.histogram_region_buttons[self.current_histogram_region].setChecked(True)
+        self.histogram_region_group.buttonClicked.connect(
+            self._on_histogram_region_changed
+        )
+        self._update_histogram_region_controls()
         histogram_header.addWidget(self.top_contour_count_label)
         layout.addLayout(histogram_header)
         self.top_contour_histogram = TopContourHistogram()
@@ -751,7 +773,9 @@ class MainWindow(QMainWindow):
         preview_label.setAlignment(Qt.AlignCenter)
         preview_label.setWordWrap(True)
         preview_label.setMinimumHeight(160)
-        preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # 미리보기 Pixmap의 원본 폭이 카드의 최소 폭으로 전파되지 않게 한다.
+        # 따라서 파일마다 미리보기 크기가 달라도 세 컬럼의 폭은 유지된다.
+        preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         preview_layout.addWidget(preview_label)
         parent_layout.addWidget(preview_section, stretch=1)
         return preview_label
@@ -762,7 +786,8 @@ class MainWindow(QMainWindow):
         label.setAlignment(Qt.AlignCenter)
         label.setWordWrap(True)
         label.setMinimumHeight(300)
-        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # 이미지 자체의 크기가 레이아웃 폭을 밀어내지 않도록 가로 크기 힌트를 무시한다.
+        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         return label
 
     def _show_image_modal(self, pixmap, title):
@@ -771,26 +796,34 @@ class MainWindow(QMainWindow):
 
     # ---------------- Capture ----------------
     @staticmethod
-    def _next_capture_path(capture_dir):
-        """기존 캡처 뒤에 이어질 다섯 자리 JPG 파일 경로를 반환한다."""
+    def _next_capture_path(capture_dir, source_path):
+        """원본 파일명별 다음 캡처 순번의 JPG 파일 경로를 반환한다."""
 
+        filename = source_path.stem
+        prefix = f"{filename}_"
         sequence_numbers = [
-            int(path.stem)
-            for path in capture_dir.glob("*.jpg")
-            if path.stem.isdecimal() and len(path.stem) == 5
+            int(path.stem[len(prefix):])
+            for path in capture_dir.glob(f"{filename}_*.jpg")
+            if path.stem.startswith(prefix)
+            and path.stem[len(prefix):].isdecimal()
         ]
         next_sequence = max(sequence_numbers, default=0) + 1
-        return capture_dir / f"{next_sequence:05d}.jpg"
+        return capture_dir / f"{filename}_{next_sequence}.jpg"
 
     def on_capture(self):
         """현재 프로그램 화면을 실행 단위의 날짜·시간 폴더에 JPG로 저장한다."""
+
+        if not self.image_paths or self.current_index < 0:
+            QMessageBox.information(self, "캡처 저장", "먼저 TIFF 이미지를 불러오세요.")
+            return
 
         if self.capture_session_dir is None:
             timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
             self.capture_session_dir = CAPTURE_ROOT / timestamp
             self.capture_session_dir.mkdir(parents=True, exist_ok=True)
 
-        capture_path = self._next_capture_path(self.capture_session_dir)
+        source_path = self.image_paths[self.current_index]
+        capture_path = self._next_capture_path(self.capture_session_dir, source_path)
         if not self.grab().save(str(capture_path), "JPG", quality=95):
             QMessageBox.critical(self, "캡처 저장", "화면 캡처를 저장하지 못했습니다.")
             return
@@ -887,6 +920,7 @@ class MainWindow(QMainWindow):
 
         elapsed_seconds = perf_counter() - started_at
         images_per_second = 1 / max(elapsed_seconds, 0.000001)
+        self.histogram_image_width = result_image.shape[1]
         self._show_original_image(result.source_visualization)
         self._show_result_image(result_image)
         self._show_analysis_preview(result.analysis_preview)
@@ -938,7 +972,22 @@ class MainWindow(QMainWindow):
             for side_key, side_button in self.histogram_side_buttons.items()
             if side_button is button
         )
+        self._update_histogram_region_controls()
         self._show_top_contour_histogram(self.histogram_measurements)
+
+    def _on_histogram_region_changed(self, button):
+        self.current_histogram_region = next(
+            region_key
+            for region_key, region_button in self.histogram_region_buttons.items()
+            if region_button is button
+        )
+        self._show_top_contour_histogram(self.histogram_measurements)
+
+    def _update_histogram_region_controls(self):
+        """좌·우 분포 필터는 상·하면 y 좌표 분포에서만 사용한다."""
+        enabled = self.current_histogram_side in {"top", "bottom"}
+        for button in self.histogram_region_buttons.values():
+            button.setEnabled(enabled)
 
     def _show_top_contour_histogram(self, measurements):
         """선택한 면에 처음 닿는 모든 좌표의 분포를 표시한다."""
@@ -954,8 +1003,24 @@ class MainWindow(QMainWindow):
             point[coordinate_index]
             for measurement in measurements
             for point in getattr(measurement, point_attribute)
+            if (
+                self.current_histogram_side not in {"top", "bottom"}
+                or self.current_histogram_region == "all"
+                or (
+                    point[0] < self.histogram_image_width // 2
+                    if self.current_histogram_region == "left"
+                    else point[0] >= self.histogram_image_width // 2
+                )
+            )
         ]
         coordinate_axis = "y" if coordinate_index == 1 else "x"
+        region_name = {
+            "all": "전체",
+            "left": "좌측",
+            "right": "우측",
+        }[self.current_histogram_region]
+        if self.current_histogram_side not in {"top", "bottom"}:
+            region_name = "전체"
         self.top_contour_histogram.set_coordinates(
             coordinates,
             coordinate_axis,
@@ -965,8 +1030,8 @@ class MainWindow(QMainWindow):
         self.info_label.setText(
             "\n".join(self.program_log_lines + self.top_contour_histogram.log_lines)
         )
-        self.histogram_title.setText(title)
-        self.top_contour_count_label.setText(f"전체 {len(coordinates):,}개")
+        self.histogram_title.setText(f"{title} · {region_name}")
+        self.top_contour_count_label.setText(f"{region_name} {len(coordinates):,}개")
 
     @staticmethod
     def _get_histogram_coordinate_range(measurements, coordinate_index):
@@ -1038,6 +1103,7 @@ class MainWindow(QMainWindow):
             "네 기준선 교점 형태를 유지한 A 페이지 영역이 표시됩니다."
         )
         self.top_contour_histogram.set_coordinates(())
+        self.histogram_image_width = 0
         self.histogram_measurements = []
         self.top_contour_count_label.setText("전체 0개")
         self.status_label.setText("분석 실패")

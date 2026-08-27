@@ -43,6 +43,8 @@ PILLAR_DOWNWARD_POINT_COLOR = (0, 0, 255)
 PILLAR_POINT_RADIUS = 4
 HISTOGRAM_PEAK_POINT_COLOR = (82, 68, 240)  # 빨간색 (#F04452, BGR)
 HISTOGRAM_MERGE_POINT_COLOR = (0, 146, 255)  # 주황색 (#FF9200, BGR)
+CENTER_SPLIT_LINE_COLOR = (180, 180, 180)
+CUT_LINE_EXTENSION_COLOR = (112, 112, 112)
 
 @dataclass
 class ContourMeasurement:
@@ -690,8 +692,33 @@ def draw_top_pillar_reference_points(
     return preview
 
 
+def get_cut_line_y_coordinates(cut_line, x_coordinates):
+    """좌·우 컷 좌표를 잇는 선의 각 x 위치 y 좌표를 반환한다."""
+    if cut_line is None:
+        return None
+
+    (left_x, left_y), (right_x, right_y) = cut_line
+    if left_x == right_x:
+        return np.full_like(x_coordinates, left_y, dtype=np.float64)
+    return np.interp(x_coordinates, (left_x, right_x), (left_y, right_y))
+
+
+def apply_side_cutting_mask(mask, left, top, top_cut_line, bottom_cut_line):
+    """좌·우 Merge 컷 좌표를 이은 선을 기준으로 마스크의 상·하를 제거한다."""
+    x_coordinates = np.arange(left, left + mask.shape[1])
+    y_coordinates = np.arange(top, top + mask.shape[0])[:, None]
+
+    top_cut_y = get_cut_line_y_coordinates(top_cut_line, x_coordinates)
+    if top_cut_y is not None:
+        mask[y_coordinates < top_cut_y[None, :]] = 0
+
+    bottom_cut_y = get_cut_line_y_coordinates(bottom_cut_line, x_coordinates)
+    if bottom_cut_y is not None:
+        mask[y_coordinates > bottom_cut_y[None, :]] = 0
+
+
 def create_polygon_preview(
-    image, contours, measurements, mask_mode, top_cut_y=None, bottom_cut_y=None
+    image, contours, measurements, mask_mode, top_cut_line=None, bottom_cut_line=None
 ):
     """선택한 마스크 도형 내부의 원본 픽셀만 남긴 투명 Preview를 만든다."""
 
@@ -712,14 +739,9 @@ def create_polygon_preview(
         local_polygon[:, 0, 0] -= left
         local_polygon[:, 0, 1] -= top
         cv2.fillPoly(mask, [local_polygon], 255, lineType=cv2.LINE_AA)
-        if top_cut_y is not None:
-            # 상판 Merge 수평선 위쪽은 측면 커팅에서 제외한다.
-            local_cut_y = int(top_cut_y - top)
-            mask[:max(0, local_cut_y), :] = 0
-        if bottom_cut_y is not None:
-            # 하판 Merge 수평선 아래쪽은 측면 커팅에서 제외한다.
-            local_cut_y = int(bottom_cut_y - top)
-            mask[max(0, min(mask.shape[0], local_cut_y + 1)):, :] = 0
+        apply_side_cutting_mask(
+            mask, left, top, top_cut_line, bottom_cut_line
+        )
         if not np.any(mask):
             continue
         tile[:, :, 3] = cv2.bitwise_and(tile[:, :, 3], mask)
@@ -727,13 +749,9 @@ def create_polygon_preview(
     return stack_preview_tiles(tiles)
 
 
-def get_histogram_coordinate_groups(measurements, point_attribute):
+def get_histogram_coordinate_groups(points):
     """지정 면의 히스토그램 빨간색·주황색 y 좌표를 반환한다."""
-    coordinates = [
-        point[1]
-        for measurement in measurements
-        for point in getattr(measurement, point_attribute)
-    ]
+    coordinates = [point[1] for point in points]
     if not coordinates:
         return set(), set()
 
@@ -760,79 +778,128 @@ def get_histogram_coordinate_groups(measurements, point_attribute):
     return peak_coordinates, merge_coordinates - peak_coordinates
 
 
-def get_merge_coordinates(measurements, point_attribute):
-    """지정 면의 최빈·병합 후보 y 좌표를 반환한다."""
-    peak_coordinates, merge_coordinates = get_histogram_coordinate_groups(
-        measurements, point_attribute
+def get_side_points(measurements, point_attribute, midpoint_x):
+    """상·하면 외곽 접점을 이미지 중앙 x 좌표를 기준으로 좌·우로 나눈다."""
+    left_points, right_points = [], []
+    for measurement in measurements:
+        for point in getattr(measurement, point_attribute):
+            (left_points if point[0] < midpoint_x else right_points).append(point)
+    return left_points, right_points
+
+
+def get_side_cut_coordinate(points, use_maximum):
+    """Merge 후보가 첫 접점에서 멀면 ±3px 범위에서 임시 후보를 재계산한다."""
+    peak_coordinates, merge_coordinates = get_histogram_coordinate_groups(points)
+    candidates = peak_coordinates | merge_coordinates
+    if not candidates:
+        return None, peak_coordinates
+
+    # 상면은 가장 먼저 닿는 가장 작은 y, 하면은 가장 먼저 닿는 가장 큰 y가
+    # 기준이다. 기존 Merge 컷이 이 기준에서 4px 이상 벗어나면, 기준점 ±3px
+    # 안의 모든 막대만으로 빨간·주황 후보를 임시 재계산한다. 이 결과는 컷
+    # 선택에만 쓰며, 화면의 전체 히스토그램 표시는 변경하지 않는다.
+    first_contact_y = min(point[1] for point in points) if use_maximum else max(
+        point[1] for point in points
     )
-    return peak_coordinates | merge_coordinates
+    cut_y = max(candidates) if use_maximum else min(candidates)
+    if abs(cut_y - first_contact_y) >= 4:
+        nearby_points = [
+            point for point in points if abs(point[1] - first_contact_y) <= 3
+        ]
+        nearby_peaks, nearby_merges = get_histogram_coordinate_groups(nearby_points)
+        nearby_candidates = nearby_peaks | nearby_merges
+        if nearby_candidates:
+            cut_y = (
+                max(nearby_candidates)
+                if use_maximum
+                else min(nearby_candidates)
+            )
+            peak_coordinates = nearby_peaks
+    return cut_y, peak_coordinates
 
 
-def get_top_merge_coordinates(measurements):
-    """상면 최빈·병합 후보 y 좌표를 반환한다."""
-    return get_merge_coordinates(measurements, "top_points")
+def get_cut_marker_point(points, cut_y):
+    """선으로 연결할 Merge 컷 y 좌표의 실제 외곽 접점 하나를 고른다."""
+    candidates = [point for point in points if point[1] == cut_y]
+    if not candidates:
+        return None
+    median_x = np.median([point[0] for point in candidates])
+    return min(candidates, key=lambda point: (abs(point[0] - median_x), point[0]))
 
 
-def get_top_merge_cut_coordinate(measurements):
-    """상면 최빈·병합 후보 중 가장 큰 y 좌표를 반환한다."""
-    merge_coordinates = get_top_merge_coordinates(measurements)
-    return max(merge_coordinates) if merge_coordinates else None
+def extend_line_to_image_edges(line, image_width):
+    """두 접점을 잇는 선을 이미지의 좌·우 끝까지 연장한다."""
+    (left_x, left_y), (right_x, right_y) = line
+    if left_x == right_x:
+        return ((0, left_y), (image_width - 1, right_y))
 
-
-def get_bottom_merge_cut_coordinate(measurements):
-    """하면 최빈·병합 후보 중 가장 작은 y 좌표를 반환한다."""
-    merge_coordinates = get_merge_coordinates(measurements, "bottom_points")
-    return min(merge_coordinates) if merge_coordinates else None
-
-
-def draw_side_cutting_boundary_points(
-    image, measurements, point_attribute, cut_y
-):
-    """A/B 페이지 결과에 커팅 경계의 좌·우 점과 연결선을 표시한다."""
-    if cut_y is None:
-        return
-
-    peak_coordinates, merge_coordinates = get_histogram_coordinate_groups(
-        measurements, point_attribute
+    slope = (right_y - left_y) / (right_x - left_x)
+    return (
+        (0, int(round(left_y - left_x * slope))),
+        (image_width - 1, int(round(left_y + (image_width - 1 - left_x) * slope))),
     )
-    highlighted_coordinates = peak_coordinates | merge_coordinates
-    points = [
-        point
-        for measurement in measurements
-        for point in getattr(measurement, point_attribute)
-        if point[1] in highlighted_coordinates
-    ]
-    if not points:
-        return
 
-    color = (
-        HISTOGRAM_PEAK_POINT_COLOR
-        if cut_y in peak_coordinates
-        else HISTOGRAM_MERGE_POINT_COLOR
+
+def get_side_cut_line(measurements, point_attribute, image_width, use_maximum):
+    """좌·우 절반의 Merge 컷 y 좌표를 하나의 측면 커팅선으로 연결한다."""
+    midpoint_x = image_width // 2
+    left_points, right_points = get_side_points(
+        measurements, point_attribute, midpoint_x
     )
-    image_height, image_width = image.shape[:2]
-    if not 0 <= cut_y < image_height:
-        return
+    left_y, left_peaks = get_side_cut_coordinate(left_points, use_maximum)
+    right_y, right_peaks = get_side_cut_coordinate(right_points, use_maximum)
+    if left_y is None or right_y is None:
+        return None
 
-    point_start_x = max(0, min(point[0] for point in points))
-    point_end_x = min(image_width - 1, max(point[0] for point in points))
+    left_marker = get_cut_marker_point(left_points, left_y)
+    right_marker = get_cut_marker_point(right_points, right_y)
+    if left_marker is None or right_marker is None:
+        return None
+
+    return {
+        "line": (left_marker, right_marker),
+        "extended_line": extend_line_to_image_edges(
+            (left_marker, right_marker), image_width
+        ),
+        "left_peak": left_y in left_peaks,
+        "right_peak": right_y in right_peaks,
+    }
+
+
+def draw_side_cutting_guides(image, midpoint_x):
+    """좌·우 Merge 집계를 나누는 이미지 중앙 기준선을 표시한다."""
     cv2.line(
         image,
-        (0, cut_y),
-        (image_width - 1, cut_y),
-        color,
-        thickness=1,
-        lineType=cv2.LINE_8,
+        (midpoint_x, 0),
+        (midpoint_x, image.shape[0] - 1),
+        CENTER_SPLIT_LINE_COLOR,
+        1,
+        cv2.LINE_AA,
     )
-    for point_x in {point_start_x, point_end_x}:
-        cv2.circle(
-            image,
-            (point_x, cut_y),
-            radius=2,
-            color=color,
-            thickness=cv2.FILLED,
-            lineType=cv2.LINE_8,
-        )
+
+
+def draw_side_cutting_boundary(image, cut_boundary):
+    """접점, 접점 연결선, 그리고 그 양쪽 연장선을 표시한다."""
+    if cut_boundary is None:
+        return
+
+    start, end = cut_boundary["line"]
+    extension_start, extension_end = cut_boundary["extended_line"]
+    cv2.line(
+        image,
+        extension_start,
+        extension_end,
+        CUT_LINE_EXTENSION_COLOR,
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.line(image, start, end, HISTOGRAM_MERGE_POINT_COLOR, 2, cv2.LINE_AA)
+    for point, is_peak in (
+        (start, cut_boundary["left_peak"]),
+        (end, cut_boundary["right_peak"]),
+    ):
+        color = HISTOGRAM_PEAK_POINT_COLOR if is_peak else HISTOGRAM_MERGE_POINT_COLOR
+        cv2.circle(image, point, radius=3, color=color, thickness=cv2.FILLED)
 
 
 def load_ab_tiff_pages(image_path):
@@ -872,30 +939,29 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         measurement = find_first_contact_points(contour, gray.shape)
         result.measurements.append(measurement)
 
-    top_cut_y = None
-    bottom_cut_y = None
+    top_cut_boundary = None
+    bottom_cut_boundary = None
     if show_side_cutting:
-        top_cut_y = get_top_merge_cut_coordinate(result.measurements)
-        bottom_cut_y = get_bottom_merge_cut_coordinate(result.measurements)
+        image_width = gray.shape[1]
+        top_cut_boundary = get_side_cut_line(
+            result.measurements, "top_points", image_width, use_maximum=True
+        )
+        bottom_cut_boundary = get_side_cut_line(
+            result.measurements, "bottom_points", image_width, use_maximum=False
+        )
 
     result_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) # 그레이 스케일를 컬로로 변환하여 컨투어 색상이 보이게
     if show_side_cutting:
-        draw_side_cutting_boundary_points(
-            result_image, result.measurements, "top_points", top_cut_y
-        )
-        draw_side_cutting_boundary_points(
-            result_image, result.measurements, "bottom_points", bottom_cut_y
-        )
+        draw_side_cutting_guides(result_image, image_width // 2)
+        draw_side_cutting_boundary(result_image, top_cut_boundary)
+        draw_side_cutting_boundary(result_image, bottom_cut_boundary)
 
     source_visualization = to_bgr(image_a)
     source_preview_image = to_bgr(image_a)
     if show_side_cutting:
-        draw_side_cutting_boundary_points(
-            source_visualization, result.measurements, "top_points", top_cut_y
-        )
-        draw_side_cutting_boundary_points(
-            source_visualization, result.measurements, "bottom_points", bottom_cut_y
-        )
+        draw_side_cutting_guides(source_visualization, image_width // 2)
+        draw_side_cutting_boundary(source_visualization, top_cut_boundary)
+        draw_side_cutting_boundary(source_visualization, bottom_cut_boundary)
     result.source_visualization = source_visualization
     result.analysis_preview = create_polygon_preview(
         image_b,
@@ -908,7 +974,7 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         result.contours,
         result.measurements,
         SOURCE_PREVIEW_MASK_MODE,
-        top_cut_y=top_cut_y,
-        bottom_cut_y=bottom_cut_y,
+        top_cut_line=(top_cut_boundary or {}).get("extended_line"),
+        bottom_cut_line=(bottom_cut_boundary or {}).get("extended_line"),
     )
     return result_image, result

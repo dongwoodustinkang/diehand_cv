@@ -36,6 +36,19 @@ APP_STYLESHEET = """
     }
     QPushButton#histogramSideButton:hover { color: #3182F6; }
     QPushButton#histogramSideButton:checked { background: #3182F6; color: #FFFFFF; }
+    QFrame#histogramRegionSelector {
+        background: #F7F8FA; border: 1px solid #E5E8EB; border-radius: 8px;
+    }
+    QLabel#histogramRegionTitle {
+        color: #8B95A1; font-size: 10px; font-weight: 700;
+    }
+    QPushButton#histogramRegionButton {
+        background: transparent; border: 0; border-radius: 5px; color: #6B7684;
+        font-size: 11px; font-weight: 700; min-height: 20px; min-width: 40px;
+        padding: 0 4px;
+    }
+    QPushButton#histogramRegionButton:hover { color: #3182F6; }
+    QPushButton#histogramRegionButton:checked { background: #3182F6; color: #FFFFFF; }
     QFrame#settingRow {
         background: #F7F8FA; border: 1px solid #E5E8EB; border-radius: 10px;
     }

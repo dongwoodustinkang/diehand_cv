@@ -586,26 +586,37 @@ class MainWindow(QMainWindow):
         self.histogram_side_group.buttonClicked.connect(
             self._on_histogram_side_changed
         )
+
+        region_selector = QFrame()
+        region_selector.setObjectName("histogramRegionSelector")
+        region_layout = QVBoxLayout(region_selector)
+        region_layout.setContentsMargins(4, 3, 4, 3)
+        region_layout.setSpacing(2)
+        region_title = QLabel("영역")
+        region_title.setObjectName("histogramRegionTitle")
+        region_title.setAlignment(Qt.AlignCenter)
+        region_layout.addWidget(region_title)
         self.histogram_region_group = QButtonGroup(self)
         self.histogram_region_group.setExclusive(True)
         self.histogram_region_buttons = {}
         for region_key, label_text, tooltip in (
             ("all", "전체", "선택한 면의 전체 분포"),
-            ("left", "좌", "선택한 상·하면의 좌측 분포"),
-            ("right", "우", "선택한 상·하면의 우측 분포"),
+            ("left", "좌측", "선택한 상·하면의 좌측 분포"),
+            ("right", "우측", "선택한 상·하면의 우측 분포"),
         ):
             button = QPushButton(label_text)
-            button.setObjectName("histogramSideButton")
+            button.setObjectName("histogramRegionButton")
             button.setCheckable(True)
             button.setToolTip(tooltip)
             self.histogram_region_group.addButton(button)
             self.histogram_region_buttons[region_key] = button
-            histogram_header.addWidget(button)
+            region_layout.addWidget(button)
         self.histogram_region_buttons[self.current_histogram_region].setChecked(True)
         self.histogram_region_group.buttonClicked.connect(
             self._on_histogram_region_changed
         )
         self._update_histogram_region_controls()
+        histogram_header.addWidget(region_selector)
         histogram_header.addWidget(self.top_contour_count_label)
         layout.addLayout(histogram_header)
         self.top_contour_histogram = TopContourHistogram()

@@ -43,6 +43,7 @@ PILLAR_DOWNWARD_POINT_COLOR = (0, 0, 255)
 PILLAR_POINT_RADIUS = 4
 HISTOGRAM_PEAK_POINT_COLOR = (82, 68, 240)  # 빨간색 (#F04452, BGR)
 HISTOGRAM_MERGE_POINT_COLOR = (0, 146, 255)  # 주황색 (#FF9200, BGR)
+HISTOGRAM_REMAINDER_POINT_COLOR = (246, 130, 49)  # 파란색 (#3182F6, BGR)
 CENTER_SPLIT_LINE_COLOR = (180, 180, 180)
 CUT_LINE_EXTENSION_COLOR = (112, 112, 112)
 
@@ -866,6 +867,32 @@ def get_side_cut_line(measurements, point_attribute, image_width, use_maximum):
     }
 
 
+def draw_frequency_contact_points(image, measurements, point_attribute):
+    """선택 면 전체의 빈도에 따라 첫 접점을 빨강·주황·파랑으로 표시한다."""
+    points = [
+        point
+        for measurement in measurements
+        for point in getattr(measurement, point_attribute)
+    ]
+    peak_coordinates, merge_coordinates = get_histogram_coordinate_groups(points)
+    for point_x, point_y in points:
+        color = (
+            HISTOGRAM_PEAK_POINT_COLOR
+            if point_y in peak_coordinates
+            else HISTOGRAM_MERGE_POINT_COLOR
+            if point_y in merge_coordinates
+            else HISTOGRAM_REMAINDER_POINT_COLOR
+        )
+        cv2.circle(
+            image,
+            (point_x, point_y),
+            radius=1,
+            color=color,
+            thickness=cv2.FILLED,
+            lineType=cv2.LINE_AA,
+        )
+
+
 def draw_side_cutting_guides(image, midpoint_x):
     """좌·우 Merge 집계를 나누는 이미지 중앙 기준선을 표시한다."""
     cv2.line(
@@ -951,8 +978,10 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         )
 
     result_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) # 그레이 스케일를 컬로로 변환하여 컨투어 색상이 보이게
+    draw_frequency_contact_points(result_image, result.measurements, "top_points")
+    draw_frequency_contact_points(result_image, result.measurements, "bottom_points")
+    draw_side_cutting_guides(result_image, gray.shape[1] // 2)
     if show_side_cutting:
-        draw_side_cutting_guides(result_image, image_width // 2)
         draw_side_cutting_boundary(result_image, top_cut_boundary)
         draw_side_cutting_boundary(result_image, bottom_cut_boundary)
 

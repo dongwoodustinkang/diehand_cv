@@ -34,8 +34,8 @@ from styles import APP_STYLESHEET
 IMAGE_EXTS = {".tif", ".tiff"}
 DEFAULT_DIR = "dataset/"
 PREVIEW_SCALE = 0.8
-# DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand_cv/dataset/side/total")
-DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand")
+DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand_cv/dataset/side/total")
+# DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand")
 CAPTURE_ROOT = Path(__file__).resolve().parent / "captures"
 
 class ClickableImageLabel(QLabel):
@@ -398,6 +398,7 @@ class MainWindow(QMainWindow):
         self.current_histogram_side = "top"
         self.current_histogram_region = "all"
         self.histogram_image_width = 0
+        self.histogram_center_split_x = 0
         self.histogram_measurements = []
         self.program_log_lines = []
         self.side_cutting_enabled = False
@@ -932,6 +933,7 @@ class MainWindow(QMainWindow):
         elapsed_seconds = perf_counter() - started_at
         images_per_second = 1 / max(elapsed_seconds, 0.000001)
         self.histogram_image_width = result_image.shape[1]
+        self.histogram_center_split_x = result.center_split_x or self.histogram_image_width // 2
         self._show_original_image(result.source_visualization)
         self._show_result_image(result_image)
         self._show_analysis_preview(result.analysis_preview)
@@ -1018,13 +1020,16 @@ class MainWindow(QMainWindow):
                 self.current_histogram_side not in {"top", "bottom"}
                 or self.current_histogram_region == "all"
                 or (
-                    point[0] < self.histogram_image_width // 2
+                    point[0] < self.histogram_center_split_x
                     if self.current_histogram_region == "left"
-                    else point[0] >= self.histogram_image_width // 2
+                    else point[0] >= self.histogram_center_split_x
                 )
             )
         ]
         coordinate_axis = "y" if coordinate_index == 1 else "x"
+        coordinate_range = self._get_histogram_coordinate_range(
+            measurements, coordinate_index
+        )
         region_name = {
             "all": "전체",
             "left": "좌측",
@@ -1035,7 +1040,7 @@ class MainWindow(QMainWindow):
         self.top_contour_histogram.set_coordinates(
             coordinates,
             coordinate_axis,
-            self._get_histogram_coordinate_range(measurements, coordinate_index),
+            coordinate_range,
             self.current_histogram_side,
         )
         self.info_label.setText(
@@ -1115,6 +1120,7 @@ class MainWindow(QMainWindow):
         )
         self.top_contour_histogram.set_coordinates(())
         self.histogram_image_width = 0
+        self.histogram_center_split_x = 0
         self.histogram_measurements = []
         self.top_contour_count_label.setText("전체 0개")
         self.status_label.setText("분석 실패")
@@ -1139,6 +1145,7 @@ class MainWindow(QMainWindow):
             lines.append(f"3. 4면 첫 접점 개수 : {point_count}개")
             for index, measurement in enumerate(result.measurements, start=1):
                 lines.extend(self._first_contact_log_lines(measurement, index))
+            lines.extend(result.density_log_lines)
         self.program_log_lines = lines
         self.info_label.setText("\n".join(self.program_log_lines))
 

@@ -15,6 +15,7 @@ LEFT_RIGHT_SAMPLE_COUNT = 5
 CONTACT_POINT_MODE = "full"  # "full"이면 전체 접점 분포, "sampled"면 기존 15/5 샘플
 TOP_DENSE_BAND_TOLERANCE = 1
 MAX_COUNT_RATIO = 0.5  # 최빈 접점 수를 기준으로 삼을 비율
+FIRST_CONTACT_BAND_PIXELS = 2
 
 # 점(원)의 크기 조절
 REFERENCE_POINT_RADIUS = 2
@@ -79,6 +80,8 @@ class DetectionResult:
     analysis_preview: Optional[np.ndarray] = None
     source_preview: Optional[np.ndarray] = None
     source_visualization: Optional[np.ndarray] = None
+    density_log_lines: List[str] = field(default_factory=list)
+    center_split_x: Optional[int] = None
 
 
 def to_grayscale(image):
@@ -121,6 +124,17 @@ def find_b_contours(image_b):
     ]
 
     return DetectionResult(contours=filtered_contours)
+
+
+def get_contour_box_center_x(contours, image_width):
+    """검출된 컨투어 박스 전체의 가로 중앙 x 좌표를 구한다."""
+    if not contours:
+        return image_width // 2
+
+    boxes = [cv2.boundingRect(contour) for contour in contours]
+    left_x = min(x for x, _, _, _ in boxes)
+    right_x = max(x + width - 1 for x, _, width, _ in boxes)
+    return (left_x + right_x) // 2
 
 
 def find_first_contact_points(contour, image_shape):
@@ -788,35 +802,319 @@ def get_side_points(measurements, point_attribute, midpoint_x):
     return left_points, right_points
 
 
-def get_side_cut_coordinate(points, use_maximum):
-    """Merge 후보가 첫 접점에서 멀면 ±3px 범위에서 임시 후보를 재계산한다."""
-    peak_coordinates, merge_coordinates = get_histogram_coordinate_groups(points)
-    candidates = peak_coordinates | merge_coordinates
-    if not candidates:
-        return None, peak_coordinates
-
-    # 상면은 가장 먼저 닿는 가장 작은 y, 하면은 가장 먼저 닿는 가장 큰 y가
-    # 기준이다. 기존 Merge 컷이 이 기준에서 4px 이상 벗어나면, 기준점 ±3px
-    # 안의 모든 막대만으로 빨간·주황 후보를 임시 재계산한다. 이 결과는 컷
-    # 선택에만 쓰며, 화면의 전체 히스토그램 표시는 변경하지 않는다.
+def get_first_contact_band_points(points, use_maximum):
+    """첫 접점에서 진행 방향으로 2px 범위 안의 접점만 반환한다."""
+    if not points:
+        return []
     first_contact_y = min(point[1] for point in points) if use_maximum else max(
         point[1] for point in points
     )
-    cut_y = max(candidates) if use_maximum else min(candidates)
-    if abs(cut_y - first_contact_y) >= 4:
-        nearby_points = [
-            point for point in points if abs(point[1] - first_contact_y) <= 3
+    if use_maximum:
+        return [
+            point
+            for point in points
+            if first_contact_y <= point[1] <= first_contact_y + FIRST_CONTACT_BAND_PIXELS
         ]
-        nearby_peaks, nearby_merges = get_histogram_coordinate_groups(nearby_points)
-        nearby_candidates = nearby_peaks | nearby_merges
-        if nearby_candidates:
-            cut_y = (
-                max(nearby_candidates)
-                if use_maximum
-                else min(nearby_candidates)
-            )
-            peak_coordinates = nearby_peaks
-    return cut_y, peak_coordinates
+    return [
+        point
+        for point in points
+        if first_contact_y - FIRST_CONTACT_BAND_PIXELS <= point[1] <= first_contact_y
+    ]
+
+
+def get_first_contact_candidate_groups(points, use_maximum):
+    """첫 접점 범위의 후보에 더 빈번한 첫 접점을 주황 후보로 추가한다."""
+    band_points = get_first_contact_band_points(points, use_maximum)
+    peak_coordinates, merge_coordinates = get_histogram_coordinate_groups(band_points)
+    if not band_points or not merge_coordinates:
+        return band_points, peak_coordinates, merge_coordinates
+
+    first_contact_y = min(point[1] for point in points) if use_maximum else max(
+        point[1] for point in points
+    )
+    if first_contact_y in peak_coordinates or first_contact_y in merge_coordinates:
+        return band_points, peak_coordinates, merge_coordinates
+
+    count_by_coordinate = {}
+    for _, coordinate in band_points:
+        count_by_coordinate[coordinate] = count_by_coordinate.get(coordinate, 0) + 1
+    first_contact_count = count_by_coordinate.get(first_contact_y, 0)
+    largest_merge_count = max(
+        count_by_coordinate.get(coordinate, 0) for coordinate in merge_coordinates
+    )
+    if first_contact_count > largest_merge_count:
+        merge_coordinates = merge_coordinates | {first_contact_y}
+    return band_points, peak_coordinates, merge_coordinates
+
+
+def get_first_contact_density_log(
+    measurements, point_attribute, midpoint_x, use_maximum, side_name
+):
+    """빨강·주황 후보 좌표가 좌·우에 고르게 있는지 기록한다."""
+    points = [
+        point
+        for measurement in measurements
+        for point in getattr(measurement, point_attribute)
+    ]
+    if not points:
+        return None
+
+    band_points, peak_coordinates, merge_coordinates = (
+        get_first_contact_candidate_groups(points, use_maximum)
+    )
+    candidate_coordinates = peak_coordinates | merge_coordinates
+    candidate_points = [
+        point for point in band_points if point[1] in candidate_coordinates
+    ]
+    if not candidate_points:
+        return None
+
+    left_count = sum(point[0] < midpoint_x for point in candidate_points)
+    right_count = len(candidate_points) - left_count
+    minimum_x = min(point[0] for point in candidate_points)
+    maximum_x = max(point[0] for point in candidate_points)
+
+    if left_count == 0 or right_count == 0:
+        distribution = "한쪽 집중"
+    else:
+        balance_ratio = min(left_count, right_count) / max(left_count, right_count)
+        distribution = "좌우 균형" if balance_ratio >= 0.5 else "한쪽 치우침"
+
+    return (
+        f"[밀집도] {side_name} 빨강·주황 후보 y={sorted(candidate_coordinates)}: "
+        f"{len(candidate_points)}개 · 좌 {left_count} / 우 {right_count} · "
+        f"x={minimum_x}~{maximum_x} · {distribution}"
+    )
+
+
+def append_density_log_when_merge_exists(
+    result, point_attribute, midpoint_x, use_maximum, side_name
+):
+    """주황 Merge 후보가 있을 때만 첫 접점 x 분포를 로그로 남긴다."""
+    points = [
+        point
+        for measurement in result.measurements
+        for point in getattr(measurement, point_attribute)
+    ]
+    _, _, merge_coordinates = get_first_contact_candidate_groups(
+        points, use_maximum
+    )
+    if not merge_coordinates:
+        return
+
+    log_line = get_first_contact_density_log(
+        result.measurements,
+        point_attribute,
+        midpoint_x,
+        use_maximum,
+        side_name,
+    )
+    if log_line:
+        result.density_log_lines.append(log_line)
+        print(log_line)
+
+
+def get_concentrated_cut_line(
+    measurements, point_attribute, image_width, use_maximum, side_name, midpoint_x=None
+):
+    """상·하면 첫 접점의 좌·우 분포에 맞는 특수 컷선을 만든다."""
+    midpoint_x = image_width // 2 if midpoint_x is None else midpoint_x
+    contact_points = [
+        point
+        for measurement in measurements
+        for point in getattr(measurement, point_attribute)
+    ]
+    if not contact_points:
+        return None
+
+    band_points, peak_coordinates, merge_coordinates = (
+        get_first_contact_candidate_groups(
+            contact_points, use_maximum=use_maximum
+        )
+    )
+    if not merge_coordinates:
+        return None
+
+    candidate_coordinates = peak_coordinates | merge_coordinates
+    candidate_points = [
+        point for point in band_points if point[1] in candidate_coordinates
+    ]
+
+    # 좌·우 밀집도 판단보다 먼저, 실제 첫 접점 방향의 끝 y가 전체 접점에서
+    # 가장 많이 나타나면 해당 y를 바로 수평 컷으로 사용한다.
+    # 후보 범위의 끝 y가 아니라 전체 접점의 끝 y를 기준으로 해야 한다.
+    count_by_coordinate = {}
+    for _, coordinate in contact_points:
+        count_by_coordinate[coordinate] = count_by_coordinate.get(coordinate, 0) + 1
+    extreme_y = (
+        min(point[1] for point in contact_points)
+        if use_maximum
+        else max(point[1] for point in contact_points)
+    )
+    extreme_y_count = count_by_coordinate[extreme_y]
+    extreme_name = "최상단" if use_maximum else "최하단"
+    if extreme_y_count == max(count_by_coordinate.values()):
+        marker = get_cut_marker_point(candidate_points, extreme_y)
+        horizontal_line = ((0, extreme_y), (image_width - 1, extreme_y))
+        return {
+            "line": horizontal_line,
+            "extended_line": horizontal_line,
+            "markers": ((marker, extreme_y in peak_coordinates),),
+            "concentration_side": f"{extreme_name} 최빈",
+            "density_log_line": (
+                f"[밀집도] {side_name} {extreme_name} y={extreme_y}가 전체 접점 중 최빈 "
+                f"({extreme_y_count}개): 수평 컷선을 적용했습니다."
+            ),
+        }
+
+    left_points = [
+        point for point in candidate_points if point[0] < midpoint_x
+    ]
+    right_points = [
+        point for point in candidate_points if point[0] >= midpoint_x
+    ]
+    left_count = len(left_points)
+    right_count = len(right_points)
+    balance_ratio = min(left_count, right_count) / max(left_count, right_count)
+
+    if left_count == 0 or right_count == 0:
+        if right_count:
+            endpoint = max(right_points, key=lambda point: point[0])
+            concentration_side = "우측"
+        else:
+            endpoint = min(left_points, key=lambda point: point[0])
+            concentration_side = "좌측"
+        horizontal_line = ((0, endpoint[1]), (image_width - 1, endpoint[1]))
+        return {
+            "line": horizontal_line,
+            "extended_line": horizontal_line,
+            "markers": ((endpoint, endpoint[1] in peak_coordinates),),
+            "concentration_side": f"{concentration_side} 집중",
+            "density_log_line": (
+                f"[밀집도] {side_name} {concentration_side} 집중: 끝점 {endpoint}에 "
+                "연장 수평 컷선을 적용했습니다."
+            ),
+        }
+    if balance_ratio >= 0.5:
+        # 좌·우가 균형이면 첫 접점 방향의 끝 y가 더 많은 측에서 그 점을,
+        # 반대측에서 반대 끝 y 점을 골라 두 점을 연결한다.
+        primary_y = (
+            min(point[1] for point in candidate_points)
+            if use_maximum
+            else max(point[1] for point in candidate_points)
+        )
+        primary_coordinate_points = [
+            point for point in candidate_points if point[1] == primary_y
+        ]
+        primary_left_count = sum(
+            point[0] < midpoint_x for point in primary_coordinate_points
+        )
+        primary_right_count = len(primary_coordinate_points) - primary_left_count
+        primary_side = "좌측" if primary_left_count >= primary_right_count else "우측"
+        secondary_side = "우측" if primary_side == "좌측" else "좌측"
+
+        primary_side_points = [
+            point
+            for point in candidate_points
+            if (point[0] < midpoint_x) == (primary_side == "좌측")
+        ]
+        secondary_side_points = [
+            point
+            for point in candidate_points
+            if (point[0] < midpoint_x) == (secondary_side == "좌측")
+        ]
+        primary_side_y = (
+            min(point[1] for point in primary_side_points)
+            if use_maximum
+            else max(point[1] for point in primary_side_points)
+        )
+        secondary_side_y = (
+            max(point[1] for point in secondary_side_points)
+            if use_maximum
+            else min(point[1] for point in secondary_side_points)
+        )
+        primary_candidates = [
+            point for point in primary_side_points if point[1] == primary_side_y
+        ]
+        secondary_candidates = [
+            point for point in secondary_side_points if point[1] == secondary_side_y
+        ]
+        primary_point = (
+            min(primary_candidates, key=lambda point: point[0])
+            if primary_side == "좌측"
+            else max(primary_candidates, key=lambda point: point[0])
+        )
+        secondary_point = (
+            min(secondary_candidates, key=lambda point: point[0])
+            if secondary_side == "좌측"
+            else max(secondary_candidates, key=lambda point: point[0])
+        )
+        line = (primary_point, secondary_point)
+        return {
+            "line": line,
+            "extended_line": extend_line_to_image_edges(line, image_width),
+            "markers": (
+                (primary_point, primary_side_y in peak_coordinates),
+                (secondary_point, secondary_side_y in peak_coordinates),
+            ),
+            "concentration_side": "좌우 균형",
+            "density_log_line": (
+                f"[밀집도] {side_name} 좌우 균형: {primary_side} {extreme_name} "
+                f"y={primary_side_y} 끝점 {primary_point} → {secondary_side} "
+                f"반대 끝 y={secondary_side_y} 끝점 {secondary_point} 연결"
+            ),
+        }
+
+    if right_count > left_count:
+        majority_points = right_points
+        minority_points = left_points
+        majority_side, minority_side = "우측", "좌측"
+    else:
+        majority_points = left_points
+        minority_points = right_points
+        majority_side, minority_side = "좌측", "우측"
+
+    majority_y = (
+        min(point[1] for point in majority_points)
+        if use_maximum
+        else max(point[1] for point in majority_points)
+    )
+    minority_y = (
+        max(point[1] for point in minority_points)
+        if use_maximum
+        else min(point[1] for point in minority_points)
+    )
+    majority_point = get_cut_marker_point(majority_points, majority_y)
+    minority_point = get_cut_marker_point(minority_points, minority_y)
+
+    line = (majority_point, minority_point)
+    return {
+        "line": line,
+        "extended_line": extend_line_to_image_edges(line, image_width),
+        "markers": (
+            (majority_point, majority_y in peak_coordinates),
+            (minority_point, minority_y in peak_coordinates),
+        ),
+        "concentration_side": "한쪽 치우침",
+        "density_log_line": (
+            f"[밀집도] {side_name} 한쪽 치우침: {majority_side} {extreme_name} 점 "
+            f"{majority_point} → {minority_side} 반대 끝 점 {minority_point} 연결"
+        ),
+    }
+
+
+def get_side_cut_coordinate(points, use_maximum):
+    """첫 접점 2px 범위 안의 빨강·주황 후보에서 Merge 컷을 선택한다."""
+    band_points, peak_coordinates, merge_coordinates = (
+        get_first_contact_candidate_groups(points, use_maximum)
+    )
+    candidates = peak_coordinates | merge_coordinates
+    if not candidates:
+        return None, peak_coordinates
+    return (
+        max(candidates) if use_maximum else min(candidates),
+        peak_coordinates,
+    )
 
 
 def get_cut_marker_point(points, cut_y):
@@ -841,9 +1139,34 @@ def extend_line_to_image_edges(line, image_width):
     )
 
 
-def get_side_cut_line(measurements, point_attribute, image_width, use_maximum):
-    """좌·우 절반의 Merge 컷 y 좌표를 하나의 측면 커팅선으로 연결한다."""
-    midpoint_x = image_width // 2
+def get_side_cut_line(
+    measurements, point_attribute, image_width, use_maximum, midpoint_x=None
+):
+    """컨투어 박스 중앙으로 나눈 좌·우 Merge 컷을 하나의 선으로 연결한다."""
+    midpoint_x = image_width // 2 if midpoint_x is None else midpoint_x
+    all_points = [
+        point
+        for measurement in measurements
+        for point in getattr(measurement, point_attribute)
+    ]
+    band_points, peak_coordinates, merge_coordinates = (
+        get_first_contact_candidate_groups(all_points, use_maximum)
+    )
+
+    # 최빈 좌표 근처에 주황 Merge 후보가 없으면, 최빈 좌표 자체에 수평선을
+    # 만들고 그 선을 측면 커팅 기준으로 사용한다.
+    if peak_coordinates and not merge_coordinates:
+        cut_y = max(peak_coordinates) if use_maximum else min(peak_coordinates)
+        marker = get_cut_marker_point(all_points, cut_y)
+        if marker is None:
+            return None
+        horizontal_line = ((0, cut_y), (image_width - 1, cut_y))
+        return {
+            "line": horizontal_line,
+            "extended_line": horizontal_line,
+            "markers": ((marker, True),),
+        }
+
     left_points, right_points = get_side_points(
         measurements, point_attribute, midpoint_x
     )
@@ -862,19 +1185,23 @@ def get_side_cut_line(measurements, point_attribute, image_width, use_maximum):
         "extended_line": extend_line_to_image_edges(
             (left_marker, right_marker), image_width
         ),
-        "left_peak": left_y in left_peaks,
-        "right_peak": right_y in right_peaks,
+        "markers": (
+            (left_marker, left_y in left_peaks),
+            (right_marker, right_y in right_peaks),
+        ),
     }
 
 
-def draw_frequency_contact_points(image, measurements, point_attribute):
+def draw_frequency_contact_points(image, measurements, point_attribute, use_maximum):
     """선택 면 전체의 빈도에 따라 첫 접점을 빨강·주황·파랑으로 표시한다."""
     points = [
         point
         for measurement in measurements
         for point in getattr(measurement, point_attribute)
     ]
-    peak_coordinates, merge_coordinates = get_histogram_coordinate_groups(points)
+    band_points, peak_coordinates, merge_coordinates = (
+        get_first_contact_candidate_groups(points, use_maximum)
+    )
     for point_x, point_y in points:
         color = (
             HISTOGRAM_PEAK_POINT_COLOR
@@ -894,7 +1221,7 @@ def draw_frequency_contact_points(image, measurements, point_attribute):
 
 
 def draw_side_cutting_guides(image, midpoint_x):
-    """좌·우 Merge 집계를 나누는 이미지 중앙 기준선을 표시한다."""
+    """좌·우 Merge 집계를 나누는 컨투어 박스 중앙 기준선을 표시한다."""
     cv2.line(
         image,
         (midpoint_x, 0),
@@ -920,11 +1247,11 @@ def draw_side_cutting_boundary(image, cut_boundary):
         1,
         cv2.LINE_AA,
     )
-    cv2.line(image, start, end, HISTOGRAM_MERGE_POINT_COLOR, 2, cv2.LINE_AA)
-    for point, is_peak in (
-        (start, cut_boundary["left_peak"]),
-        (end, cut_boundary["right_peak"]),
-    ):
+    # 수평 컷선처럼 실제 선과 연장선이 같으면 전체를 회색 연장선으로 둔다.
+    # 두 실제 접점을 잇는 구간만 별도로 존재할 때만 주황색으로 강조한다.
+    if (start, end) != (extension_start, extension_end):
+        cv2.line(image, start, end, HISTOGRAM_MERGE_POINT_COLOR, 1, cv2.LINE_AA)
+    for point, is_peak in cut_boundary["markers"]:
         color = HISTOGRAM_PEAK_POINT_COLOR if is_peak else HISTOGRAM_MERGE_POINT_COLOR
         cv2.circle(image, point, radius=3, color=color, thickness=cv2.FILLED)
 
@@ -960,27 +1287,78 @@ def create_detection_visualization(image_path, show_side_cutting=True):
 
     gray = to_grayscale(image_b) # 이미지 파일 그레이 스케일 
     result = find_b_contours(image_b) # 컨투어링 작업
+    center_split_x = get_contour_box_center_x(result.contours, gray.shape[1])
+    result.center_split_x = center_split_x
 
     for contour in result.contours:
         # 컨투어에 가장 먼저 닿는 접점 찾기
         measurement = find_first_contact_points(contour, gray.shape)
         result.measurements.append(measurement)
 
+    append_density_log_when_merge_exists(
+        result, "top_points", center_split_x, use_maximum=True, side_name="상면"
+    )
+    append_density_log_when_merge_exists(
+        result,
+        "bottom_points",
+        center_split_x,
+        use_maximum=False,
+        side_name="하면",
+    )
+
     top_cut_boundary = None
     bottom_cut_boundary = None
     if show_side_cutting:
         image_width = gray.shape[1]
-        top_cut_boundary = get_side_cut_line(
-            result.measurements, "top_points", image_width, use_maximum=True
+        top_cut_boundary = get_concentrated_cut_line(
+            result.measurements,
+            "top_points",
+            image_width,
+            use_maximum=True,
+            side_name="상면",
+            midpoint_x=center_split_x,
         )
-        bottom_cut_boundary = get_side_cut_line(
-            result.measurements, "bottom_points", image_width, use_maximum=False
+        if top_cut_boundary is not None:
+            log_line = top_cut_boundary["density_log_line"]
+            result.density_log_lines.append(log_line)
+            print(log_line)
+        else:
+            top_cut_boundary = get_side_cut_line(
+                result.measurements,
+                "top_points",
+                image_width,
+                use_maximum=True,
+                midpoint_x=center_split_x,
+            )
+        bottom_cut_boundary = get_concentrated_cut_line(
+            result.measurements,
+            "bottom_points",
+            image_width,
+            use_maximum=False,
+            side_name="하면",
+            midpoint_x=center_split_x,
         )
+        if bottom_cut_boundary is None:
+            bottom_cut_boundary = get_side_cut_line(
+                result.measurements,
+                "bottom_points",
+                image_width,
+                use_maximum=False,
+                midpoint_x=center_split_x,
+            )
+        else:
+            log_line = bottom_cut_boundary["density_log_line"]
+            result.density_log_lines.append(log_line)
+            print(log_line)
 
     result_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) # 그레이 스케일를 컬로로 변환하여 컨투어 색상이 보이게
-    draw_frequency_contact_points(result_image, result.measurements, "top_points")
-    draw_frequency_contact_points(result_image, result.measurements, "bottom_points")
-    draw_side_cutting_guides(result_image, gray.shape[1] // 2)
+    draw_frequency_contact_points(
+        result_image, result.measurements, "top_points", use_maximum=True
+    )
+    draw_frequency_contact_points(
+        result_image, result.measurements, "bottom_points", use_maximum=False
+    )
+    draw_side_cutting_guides(result_image, center_split_x)
     if show_side_cutting:
         draw_side_cutting_boundary(result_image, top_cut_boundary)
         draw_side_cutting_boundary(result_image, bottom_cut_boundary)
@@ -988,7 +1366,7 @@ def create_detection_visualization(image_path, show_side_cutting=True):
     source_visualization = to_bgr(image_a)
     source_preview_image = to_bgr(image_a)
     if show_side_cutting:
-        draw_side_cutting_guides(source_visualization, image_width // 2)
+        draw_side_cutting_guides(source_visualization, center_split_x)
         draw_side_cutting_boundary(source_visualization, top_cut_boundary)
         draw_side_cutting_boundary(source_visualization, bottom_cut_boundary)
     result.source_visualization = source_visualization

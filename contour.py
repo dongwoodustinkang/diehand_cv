@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 # 검출할 컨투어의 최소/최대 크기
 MIN_CONTOUR_AREA = 3500
@@ -29,6 +29,7 @@ SOURCE_PREVIEW_OUTER_MARGIN = 0
 SOURCE_PREVIEW_TOP_SCAN_HEIGHT = 3
 SOURCE_PREVIEW_EDGE_CHANGE_THRESHOLD = 40
 SOURCE_PREVIEW_EDGE_CHANGE_WINDOW = 3
+SOURCE_PREVIEW_HORIZONTAL_CHANGE_MIN_RUN = 3
 SOURCE_PREVIEW_COLOR_CHANGE_MIN_RUN = 3
 SOURCE_PREVIEW_INVALID_Y_DIFFERENCE = 10
 # "contour", "approx_polygon", 또는 "line_quadrilateral"
@@ -40,8 +41,12 @@ TOP_COLOR = (248, 189, 56)  # 하늘색 (BGR)
 BOTTOM_COLOR = (0, 0, 255)
 LEFT_COLOR = (0, 255, 0)
 RIGHT_COLOR = (0, 255, 255)
-PILLAR_DOWNWARD_POINT_COLOR = (0, 0, 255)
+PILLAR_REFERENCE_POINT_COLOR = (128, 128, 128)
+PILLAR_DOWNWARD_COLOR = TOP_COLOR
 PILLAR_POINT_RADIUS = 4
+PILLAR_REFERENCE_POINT_OUTER_OFFSET = 5
+PILLAR_REFERENCE_BRIGHTNESS_MIN = 250
+PILLAR_REFERENCE_BRIGHTNESS_MAX = 255
 HISTOGRAM_PEAK_POINT_COLOR = (82, 68, 240)  # 빨간색 (#F04452, BGR)
 HISTOGRAM_MERGE_POINT_COLOR = (0, 146, 255)  # 주황색 (#FF9200, BGR)
 HISTOGRAM_REMAINDER_POINT_COLOR = (246, 130, 49)  # 파란색 (#3182F6, BGR)
@@ -588,7 +593,13 @@ def get_polygon_crop_bounds(polygon, image_shape):
 
 
 def find_top_pillar_reference_points(image):
-    """원본 A 페이지 상단의 큰 밝기 변화 두 지점을 찾는다."""
+    """상단 양 끝에서 중앙으로 처음 만나는 큰 밝기 변화점을 찾는다.
+
+    좌측은 ``(0, 0)``에서 오른쪽으로, 우측은 실제 마지막 픽셀
+    ``(width - 1, 0)``에서 왼쪽으로 이동한다. 상단 행에서 두 변화점을
+    찾지 못하면 y를 증가시켜 아래 행에서도 같은 탐색을 반복한다. 각 방향에서
+    큰 변화가 연속으로 확인되는 첫 좌표만 반환해 가장자리 노이즈를 제외한다.
+    """
 
     grayscale = to_grayscale(image)
     image_width = image.shape[1]
@@ -596,36 +607,61 @@ def find_top_pillar_reference_points(image):
     if image_width < 2 or image_height < SOURCE_PREVIEW_TOP_SCAN_HEIGHT:
         return None
 
-    # 상단 몇 줄의 중앙값으로 노이즈를 줄인 뒤, x 방향 밝기 변화가 큰 첫·마지막
-    # 지점을 각각 좌·우 기둥 경계로 사용한다.
-    top_profile = np.median(
-        grayscale[:SOURCE_PREVIEW_TOP_SCAN_HEIGHT, :], axis=0
-    )
-    # 인접 픽셀만 비교하면 완만한 경계가 누락될 수 있어, 좌·우 3 px 간격의
-    # 밝기 차이를 사용한다. 좌/우 절반에서 변화량이 가장 큰 점이 기둥 경계다.
     edge_window = SOURCE_PREVIEW_EDGE_CHANGE_WINDOW
-    if image_width <= edge_window * 2:
+    min_run = SOURCE_PREVIEW_HORIZONTAL_CHANGE_MIN_RUN
+    if image_width <= edge_window * 2 or image_width < min_run:
         return None
-    horizontal_changes = np.zeros(image_width, dtype=np.float32)
-    horizontal_changes[edge_window:-edge_window] = np.abs(
-        top_profile[edge_window * 2 :] - top_profile[: -edge_window * 2]
-    )
     midpoint_x = image_width // 2
-    left_x = int(np.argmax(horizontal_changes[:midpoint_x]))
-    right_x = int(midpoint_x + np.argmax(horizontal_changes[midpoint_x:]))
-    if (
-        horizontal_changes[left_x] < SOURCE_PREVIEW_EDGE_CHANGE_THRESHOLD
-        or horizontal_changes[right_x] < SOURCE_PREVIEW_EDGE_CHANGE_THRESHOLD
-    ):
-        return None
-    if left_x >= right_x:
+    if midpoint_x - edge_window < min_run:
         return None
 
-    point_y = PILLAR_POINT_RADIUS
-    return (
-        (max(0, left_x - 5), point_y),
-        (min(image_width - 1, right_x + 5), point_y),
-    )
+    def first_persistent_change(profile, scan_x, reference_offset):
+        """스캔 순서의 x 좌표 중 임계값 초과가 연속되는 첫 x를 반환한다."""
+
+        candidates = list(scan_x)
+        changes = np.asarray(
+            [
+                abs(
+                    int(profile[x])
+                    - int(profile[x + reference_offset])
+                )
+                for x in candidates
+            ],
+            dtype=np.int16,
+        )
+        changed = changes >= SOURCE_PREVIEW_EDGE_CHANGE_THRESHOLD
+        persistent = np.convolve(
+            changed.astype(np.int16),
+            np.ones(min_run, dtype=np.int16),
+            mode="valid",
+        ) >= min_run
+        if not np.any(persistent):
+            return None
+        return candidates[int(np.flatnonzero(persistent)[0])]
+
+    # y=0에서 먼저 확인하고, 변화점이 없으면 아래 행으로 한 줄씩 이동한다.
+    # 각 행은 연속된 3줄의 중앙값으로 만들어 센서 노이즈를 줄인다.
+    for scan_y in range(image_height - SOURCE_PREVIEW_TOP_SCAN_HEIGHT + 1):
+        profile = np.median(
+            grayscale[
+                scan_y : scan_y + SOURCE_PREVIEW_TOP_SCAN_HEIGHT, :
+            ],
+            axis=0,
+        ).astype(np.int16)
+        # 왼쪽은 x=0에서 증가하는 방향, 오른쪽은 x=width-1에서 감소하는 방향으로
+        # 중앙선 바로 전까지만 탐색한다. 비교 대상은 각각 시작점 쪽 픽셀이다.
+        left_x = first_persistent_change(
+            profile, range(edge_window, midpoint_x), -edge_window
+        )
+        right_x = first_persistent_change(
+            profile,
+            range(image_width - 1 - edge_window, midpoint_x - 1, -1),
+            edge_window,
+        )
+        if left_x is not None and right_x is not None and left_x < right_x:
+            return ((left_x, scan_y), (right_x, scan_y))
+
+    return None
 
 
 def find_downward_color_change_points(image, reference_points):
@@ -684,14 +720,58 @@ def find_downward_color_change_points(image, reference_points):
     )
 
 
+def get_pillar_outer_reference_points(image, reference_points):
+    """바깥쪽 x 위치에서 밝기 250~255인 첫 기준점을 반환한다."""
+
+    if reference_points is None or len(reference_points) != 2:
+        return ()
+
+    grayscale = to_grayscale(image)
+    image_height, image_width = grayscale.shape[:2]
+    left_point, right_point = sorted(reference_points, key=lambda point: point[0])
+    x_coordinates = (
+        max(0, left_point[0] - PILLAR_REFERENCE_POINT_OUTER_OFFSET),
+        min(image_width - 1, right_point[0] + PILLAR_REFERENCE_POINT_OUTER_OFFSET),
+    )
+
+    bright_points = []
+    for point, point_x in zip((left_point, right_point), x_coordinates):
+        start_y = min(max(0, point[1]), image_height - 1)
+        vertical_profile = grayscale[start_y:, point_x]
+        bright_y = np.flatnonzero(
+            (vertical_profile >= PILLAR_REFERENCE_BRIGHTNESS_MIN)
+            & (vertical_profile <= PILLAR_REFERENCE_BRIGHTNESS_MAX)
+        )
+        if len(bright_y) == 0:
+            return ()
+        bright_points.append((point_x, int(start_y + bright_y[0])))
+
+    return tuple(bright_points)
+
+
 def draw_top_pillar_reference_points(
     image, reference_points, downward_points=()
 ):
-    """원본 A 페이지에 아래 방향 변화점 기준 수평선만 표시한다."""
+    """원본 A 페이지에 좌우 색 변화 기준점과 필요한 수평선을 표시한다."""
 
     preview = to_bgr(image)
     if reference_points is None:
         return preview
+
+    # 변화 좌표보다 바깥쪽 x 위치에서 밝기 250~255인 지점에 회색 점을 표시한다.
+    # 좌측: x₁ - 5px, 우측: x₂ + 5px (이미지 범위를 벗어나지 않게 제한)
+    display_points = get_pillar_outer_reference_points(
+        preview, reference_points
+    )
+    for point in display_points:
+        cv2.circle(
+            preview,
+            point,
+            PILLAR_POINT_RADIUS,
+            PILLAR_REFERENCE_POINT_COLOR,
+            thickness=cv2.FILLED,
+            lineType=cv2.LINE_AA,
+        )
 
     if len(downward_points) == 2:
         left_point, right_point = sorted(downward_points, key=lambda point: point[0])
@@ -700,10 +780,20 @@ def draw_top_pillar_reference_points(
             preview,
             (left_point[0], line_y),
             (right_point[0], line_y),
-            PILLAR_DOWNWARD_POINT_COLOR,
+            PILLAR_DOWNWARD_COLOR,
             thickness=1,
             lineType=cv2.LINE_AA,
         )
+        # 선을 먼저 그린 뒤 점을 덮어 그려 흰색 변화점이 가려지지 않게 한다.
+        for point in (left_point, right_point):
+            cv2.circle(
+                preview,
+                point,
+                PILLAR_POINT_RADIUS,
+                PILLAR_DOWNWARD_COLOR,
+                thickness=cv2.FILLED,
+                lineType=cv2.LINE_AA,
+            )
     return preview
 
 
@@ -762,6 +852,66 @@ def create_polygon_preview(
         tile[:, :, 3] = cv2.bitwise_and(tile[:, :, 3], mask)
         tiles.append(tile)
     return stack_preview_tiles(tiles)
+
+
+def add_preview_caption(preview, caption):
+    """비교 미리보기 위에 짧은 제목을 붙인다."""
+
+    if preview is None or preview.size == 0:
+        return None
+
+    caption_height = 30
+    height, width = preview.shape[:2]
+    labeled = np.zeros((height + caption_height, width, 4), dtype=np.uint8)
+    labeled[:caption_height, :, :3] = (245, 245, 245)
+    labeled[:caption_height, :, 3] = 255
+    labeled[caption_height:] = preview
+    # OpenCV 기본 글꼴은 한글을 지원하지 않아 Pillow의 macOS 한글 글꼴을 사용한다.
+    try:
+        font = ImageFont.truetype(
+            "/System/Library/Fonts/AppleSDGothicNeo.ttc", 14
+        )
+        caption_image = Image.fromarray(
+            cv2.cvtColor(labeled, cv2.COLOR_BGRA2RGBA)
+        )
+        ImageDraw.Draw(caption_image).text(
+            (8, 6), caption, font=font, fill=(70, 70, 70, 255)
+        )
+        labeled = cv2.cvtColor(
+            np.asarray(caption_image), cv2.COLOR_RGBA2BGRA
+        )
+    except OSError:
+        cv2.putText(
+            labeled,
+            caption,
+            (8, 21),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (70, 70, 70),
+            1,
+            cv2.LINE_AA,
+        )
+    return labeled
+
+
+def create_preview_comparison(left_preview, left_caption, right_preview, right_caption):
+    """두 A 페이지 크롭 결과를 나란히 비교할 투명 미리보기로 만든다."""
+
+    left = add_preview_caption(left_preview, left_caption)
+    right = add_preview_caption(right_preview, right_caption)
+    if left is None:
+        return right
+    if right is None:
+        return left
+
+    gap = 12
+    preview_height = max(left.shape[0], right.shape[0])
+    preview_width = left.shape[1] + gap + right.shape[1]
+    comparison = np.zeros((preview_height, preview_width, 4), dtype=np.uint8)
+    comparison[: left.shape[0], : left.shape[1]] = left
+    right_x = left.shape[1] + gap
+    comparison[: right.shape[0], right_x : right_x + right.shape[1]] = right
+    return comparison
 
 
 def get_histogram_coordinate_groups(points):
@@ -1363,7 +1513,17 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         draw_side_cutting_boundary(result_image, top_cut_boundary)
         draw_side_cutting_boundary(result_image, bottom_cut_boundary)
 
-    source_visualization = to_bgr(image_a)
+    # A 페이지 상단의 양 끝에서 중앙으로 스캔한 색 변화점을 회색 점으로 표시한다.
+    pillar_reference_points = find_top_pillar_reference_points(image_a)
+    pillar_outer_reference_points = get_pillar_outer_reference_points(
+        image_a, pillar_reference_points
+    )
+    pillar_downward_points = find_downward_color_change_points(
+        image_a, pillar_outer_reference_points
+    )
+    source_visualization = draw_top_pillar_reference_points(
+        image_a, pillar_reference_points, pillar_downward_points
+    )
     source_preview_image = to_bgr(image_a)
     if show_side_cutting:
         draw_side_cutting_guides(source_visualization, center_split_x)
@@ -1376,12 +1536,30 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         result.measurements,
         ANALYSIS_PREVIEW_MASK_MODE,
     )
-    result.source_preview = create_polygon_preview(
+    pillar_top_cut_line = (
+        pillar_downward_points if len(pillar_downward_points) == 2 else None
+    )
+    existing_top_cut_line = (top_cut_boundary or {}).get("extended_line")
+    blue_line_preview = create_polygon_preview(
         source_preview_image,
         result.contours,
         result.measurements,
         SOURCE_PREVIEW_MASK_MODE,
-        top_cut_line=(top_cut_boundary or {}).get("extended_line"),
+        top_cut_line=pillar_top_cut_line,
         bottom_cut_line=(bottom_cut_boundary or {}).get("extended_line"),
+    )
+    gray_line_preview = create_polygon_preview(
+        source_preview_image,
+        result.contours,
+        result.measurements,
+        SOURCE_PREVIEW_MASK_MODE,
+        top_cut_line=existing_top_cut_line,
+        bottom_cut_line=(bottom_cut_boundary or {}).get("extended_line"),
+    )
+    result.source_preview = create_preview_comparison(
+        blue_line_preview,
+        "기둥 기준(Blue)" if pillar_top_cut_line else "기둥 기준(Blue) 미검출",
+        gray_line_preview,
+        "최상단/빈도 기준(Gray)",
     )
     return result_image, result

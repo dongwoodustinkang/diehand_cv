@@ -557,8 +557,8 @@ class MainWindow(QMainWindow):
         )
         self.source_preview_label = self._create_preview_section(
             layout,
-            "A 페이지 기준선 교점 사각형",
-            "네 기준선 교점 형태를 유지한 A 페이지 영역이 표시됩니다.",
+            "A 페이지 기준선 교점 사각형 비교",
+            "하늘색 기준선과 기존 회색 기준선 크롭 결과를 나란히 표시합니다.",
         )
         histogram_header = QHBoxLayout()
         histogram_header.setContentsMargins(0, 0, 0, 0)
@@ -629,7 +629,7 @@ class MainWindow(QMainWindow):
         )
         self.source_preview_label.clicked.connect(
             lambda: self._show_image_modal(
-                self.source_preview_pixmap, "A 페이지 기준선 교점 사각형"
+                self.source_preview_pixmap, "A 페이지 기준선 교점 사각형 비교"
             )
         )
         return card
@@ -1116,7 +1116,7 @@ class MainWindow(QMainWindow):
         self.source_preview_pixmap = QPixmap()
         self.source_preview_label.setPixmap(QPixmap())
         self.source_preview_label.setText(
-            "네 기준선 교점 형태를 유지한 A 페이지 영역이 표시됩니다."
+            "하늘색 기준선과 기존 회색 기준선 크롭 결과가 표시됩니다."
         )
         self.top_contour_histogram.set_coordinates(())
         self.histogram_image_width = 0

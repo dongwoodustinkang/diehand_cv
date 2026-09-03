@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
 )
 
 from contour import (
+    MAX_COUNT_RATIO,
     create_detection_visualization,
     get_primary_contact_reference_point,
 )
@@ -33,8 +34,8 @@ from styles import APP_STYLESHEET
 IMAGE_EXTS = {".tif", ".tiff"}
 DEFAULT_DIR = "dataset/"
 PREVIEW_SCALE = 0.8
-# DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand_cv/dataset/side/total")
-DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand")
+DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand_cv/dataset/side/total")
+# DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand")
 CAPTURE_ROOT = Path(__file__).resolve().parent / "captures"
 
 class ClickableImageLabel(QLabel):
@@ -58,17 +59,109 @@ class TopContourHistogram(QWidget):
         self.coordinates = []
         self.coordinate_axis = "y"
         self.coordinate_range = None
+        self.histogram_side = None
+        self.log_lines = []
         self.setObjectName("topContourHistogram")
         self.setMinimumHeight(148)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def set_coordinates(
-        self, coordinates, coordinate_axis="y", coordinate_range=None
+        self, coordinates, coordinate_axis="y", coordinate_range=None,
+        histogram_side=None,
     ):
         self.coordinates = [int(coordinate) for coordinate in coordinates]
         self.coordinate_axis = coordinate_axis
         self.coordinate_range = coordinate_range
+        self.histogram_side = histogram_side
+        self._print_peak_coordinate_counts()
         self.update()
+
+    def _print_peak_coordinate_counts(self):
+        """최빈 접점 좌표와 인접 좌표의 접점 수를 터미널에 출력한다."""
+        self.log_lines = []
+        if not self.coordinates:
+            return
+
+        coordinates, counts = np.unique(self.coordinates, return_counts=True)
+        max_count = int(max(counts))
+        peak_coordinates = coordinates[counts == max_count]
+        count_by_coordinate = dict(zip(coordinates, counts))
+
+        ratio_count = max_count * MAX_COUNT_RATIO
+        ratio_log_line = (
+            f"[히스토그램] max_count_ratio={MAX_COUNT_RATIO}: "
+            f"{ratio_count}개"
+        )
+        self.log_lines.append(ratio_log_line)
+        print(ratio_log_line)
+        for peak_coordinate in peak_coordinates:
+            peak_coordinate = int(peak_coordinate)
+            previous_count = int(count_by_coordinate.get(peak_coordinate - 1, 0))
+            next_count = int(count_by_coordinate.get(peak_coordinate + 1, 0))
+            coordinate_log_line = (
+                f"[히스토그램] {self.coordinate_axis}={peak_coordinate}: "
+                f"{max_count}개, "
+                f"{self.coordinate_axis}={peak_coordinate - 1}: "
+                f"{previous_count}개, "
+                f"{self.coordinate_axis}={peak_coordinate + 1}: "
+                f"{next_count}개"
+            )
+            self.log_lines.append(coordinate_log_line)
+            print(coordinate_log_line)
+            for coordinate, count in (
+                (peak_coordinate - 1, previous_count),
+                (peak_coordinate + 1, next_count),
+            ):
+                if count <= ratio_count:
+                    continue
+
+                print(
+                    f"[히스토그램] {self.coordinate_axis}={coordinate} 접점 수({count}개)가 "
+                    f"max_count_ratio 값({ratio_count}개)보다 큽니다: Merge 가능"
+                )
+                next_coordinate = coordinate + (1 if coordinate > peak_coordinate else -1)
+                next_count = int(count_by_coordinate.get(next_coordinate, 0))
+                comparison = (
+                    "큽니다" if next_count > ratio_count
+                    else "작습니다" if next_count < ratio_count
+                    else "같습니다"
+                )
+                print(
+                    f"[히스토그램] {self.coordinate_axis}={next_coordinate} 접점 수({next_count}개)는 "
+                    f"max_count_ratio 값({ratio_count}개)보다 {comparison}."
+                )
+
+        if self.histogram_side not in {"top", "bottom"}:
+            return
+
+        merge_coordinates = set()
+        for peak_coordinate in peak_coordinates:
+            peak_coordinate = int(peak_coordinate)
+            for direction in (-1, 1):
+                adjacent_coordinate = peak_coordinate + direction
+                adjacent_count = int(count_by_coordinate.get(adjacent_coordinate, 0))
+                if adjacent_count <= ratio_count:
+                    continue
+
+                merge_coordinates.add(adjacent_coordinate)
+                next_coordinate = adjacent_coordinate + direction
+                if int(count_by_coordinate.get(next_coordinate, 0)) >= ratio_count:
+                    merge_coordinates.add(next_coordinate)
+
+        highlighted_coordinates = {
+            *(int(coordinate) for coordinate in peak_coordinates),
+            *merge_coordinates,
+        }
+        center_coordinate = (
+            max(highlighted_coordinates)
+            if self.histogram_side == "top"
+            else min(highlighted_coordinates)
+        )
+        side_name = "상판" if self.histogram_side == "top" else "하판"
+        print(
+            f"[히스토그램] {side_name} 중심 컷 좌표 : "
+            f"{self.coordinate_axis}={center_coordinate}"
+        )
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -112,16 +205,43 @@ class TopContourHistogram(QWidget):
         painter.drawLine(left, top, left, bottom)
 
         bin_width = chart_width / len(counts)
+        # 가장 많은 첫 접점이 모인 좌표(동률 포함)만 강조한다.
+        maximum_count = int(max(counts))
+        ratio_count = maximum_count * MAX_COUNT_RATIO
+        merge_bar_indexes = set()
+        peak_indexes = np.flatnonzero(counts == maximum_count)
+        for peak_index in peak_indexes:
+            for direction in (-1, 1):
+                adjacent_index = peak_index + direction
+                if not 0 <= adjacent_index < len(counts):
+                    continue
+                if counts[adjacent_index] <= ratio_count:
+                    continue
+
+                # 다음 좌표도 같은 기준을 만족할 때만 병합 색상으로 표시한다.
+                merge_bar_indexes.add(adjacent_index)
+                next_index = adjacent_index + direction
+                if (
+                    0 <= next_index < len(counts)
+                    and counts[next_index] >= ratio_count
+                ):
+                    merge_bar_indexes.add(next_index)
+
         for index, count in enumerate(counts):
             bar_height = chart_height * int(count) / total_coordinate_count
             bar_left = left + index * bin_width + 1
             bar_width = max(1, bin_width - 2)
+            bar_color = (
+                QColor("#F04452") if count == maximum_count
+                else QColor("#FF9200") if index in merge_bar_indexes
+                else QColor("#3182F6")
+            )
             painter.fillRect(
                 int(round(bar_left)),
                 int(round(bottom - bar_height)),
                 int(round(bar_width)),
                 int(round(bar_height)),
-                QColor("#3182F6"),
+                bar_color,
             )
 
         painter.setPen(QColor("#6B7684"))
@@ -276,7 +396,12 @@ class MainWindow(QMainWindow):
         self.analysis_preview_pixmap = QPixmap()
         self.source_preview_pixmap = QPixmap()
         self.current_histogram_side = "top"
+        self.current_histogram_region = "all"
+        self.histogram_image_width = 0
+        self.histogram_center_split_x = 0
         self.histogram_measurements = []
+        self.program_log_lines = []
+        self.side_cutting_enabled = False
         self.capture_session_dir = None
         self.capture_btn = QPushButton()
         self.capture_btn.setObjectName("captureIconButton")
@@ -427,13 +552,13 @@ class MainWindow(QMainWindow):
 
         self.analysis_preview_label = self._create_preview_section(
             layout,
-            "B 페이지 컨투어",
-            "검출된 컨투어 영역의 B 페이지 원본이 표시됩니다.",
+            "기둥 기준(Blue) A/B 크롭 비교",
+            "기둥 기준선을 같은 좌표로 적용한 A/B 페이지 크롭 결과를 비교합니다.",
         )
         self.source_preview_label = self._create_preview_section(
             layout,
-            "A 페이지 기준선 교점 사각형",
-            "네 기준선 교점 형태를 유지한 A 페이지 영역이 표시됩니다.",
+            "최상단/빈도 기준(Gray) 크롭",
+            "같은 회색 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다.",
         )
         histogram_header = QHBoxLayout()
         histogram_header.setContentsMargins(0, 0, 0, 0)
@@ -462,18 +587,49 @@ class MainWindow(QMainWindow):
         self.histogram_side_group.buttonClicked.connect(
             self._on_histogram_side_changed
         )
+
+        region_selector = QFrame()
+        region_selector.setObjectName("histogramRegionSelector")
+        region_layout = QVBoxLayout(region_selector)
+        region_layout.setContentsMargins(4, 3, 4, 3)
+        region_layout.setSpacing(2)
+        region_title = QLabel("영역")
+        region_title.setObjectName("histogramRegionTitle")
+        region_title.setAlignment(Qt.AlignCenter)
+        region_layout.addWidget(region_title)
+        self.histogram_region_group = QButtonGroup(self)
+        self.histogram_region_group.setExclusive(True)
+        self.histogram_region_buttons = {}
+        for region_key, label_text, tooltip in (
+            ("all", "전체", "선택한 면의 전체 분포"),
+            ("left", "좌측", "선택한 상·하면의 좌측 분포"),
+            ("right", "우측", "선택한 상·하면의 우측 분포"),
+        ):
+            button = QPushButton(label_text)
+            button.setObjectName("histogramRegionButton")
+            button.setCheckable(True)
+            button.setToolTip(tooltip)
+            self.histogram_region_group.addButton(button)
+            self.histogram_region_buttons[region_key] = button
+            region_layout.addWidget(button)
+        self.histogram_region_buttons[self.current_histogram_region].setChecked(True)
+        self.histogram_region_group.buttonClicked.connect(
+            self._on_histogram_region_changed
+        )
+        self._update_histogram_region_controls()
+        histogram_header.addWidget(region_selector)
         histogram_header.addWidget(self.top_contour_count_label)
         layout.addLayout(histogram_header)
         self.top_contour_histogram = TopContourHistogram()
         layout.addWidget(self.top_contour_histogram)
         self.analysis_preview_label.clicked.connect(
             lambda: self._show_image_modal(
-                self.analysis_preview_pixmap, "B 페이지 컨투어"
+                self.analysis_preview_pixmap, "기둥 기준(Blue) A/B 크롭 비교"
             )
         )
         self.source_preview_label.clicked.connect(
             lambda: self._show_image_modal(
-                self.source_preview_pixmap, "A 페이지 기준선 교점 사각형"
+                self.source_preview_pixmap, "최상단/빈도 기준(Gray) A/B 크롭 비교"
             )
         )
         return card
@@ -494,6 +650,7 @@ class MainWindow(QMainWindow):
             "탐지 유형", "측면 컨투어"
         ))
         controls_layout.addWidget(self._create_ball_count_control())
+        controls_layout.addWidget(self._create_side_cutting_toggle())
         controls_layout.addWidget(self._create_divider())
         controls_layout.addStretch(1)
 
@@ -587,6 +744,33 @@ class MainWindow(QMainWindow):
     def _on_max_ball_count_changed(self, count):
         self.max_ball_count = count
 
+    def _create_side_cutting_toggle(self):
+        """A 페이지의 측면 커팅 표시를 켜고 끄는 스위치를 만든다."""
+        setting_row = QFrame()
+        setting_row.setObjectName("settingRow")
+        layout = QHBoxLayout(setting_row)
+        layout.setContentsMargins(10, 8, 8, 8)
+        layout.setSpacing(8)
+
+        label = QLabel("측면 커팅")
+        label.setObjectName("controlLabel")
+        self.side_cutting_switch = QPushButton("OFF")
+        self.side_cutting_switch.setObjectName("sideCuttingSwitch")
+        self.side_cutting_switch.setCheckable(True)
+        self.side_cutting_switch.setChecked(False)
+        self.side_cutting_switch.toggled.connect(self._on_side_cutting_toggled)
+
+        layout.addWidget(label)
+        layout.addStretch()
+        layout.addWidget(self.side_cutting_switch)
+        return setting_row
+
+    def _on_side_cutting_toggled(self, enabled):
+        self.side_cutting_enabled = enabled
+        self.side_cutting_switch.setText("ON" if enabled else "OFF")
+        if self.image_paths:
+            self._detect_current_image()
+
     def _create_preview_section(self, parent_layout, title_text, empty_text):
         preview_section = QWidget()
         preview_layout = QVBoxLayout(preview_section)
@@ -630,10 +814,10 @@ class MainWindow(QMainWindow):
         filename = source_path.stem
         prefix = f"{filename}_"
         sequence_numbers = [
-            int(path.stem.removeprefix(prefix))
+            int(path.stem[len(prefix):])
             for path in capture_dir.glob(f"{filename}_*.jpg")
             if path.stem.startswith(prefix)
-            and path.stem.removeprefix(prefix).isdecimal()
+            and path.stem[len(prefix):].isdecimal()
         ]
         next_sequence = max(sequence_numbers, default=0) + 1
         return capture_dir / f"{filename}_{next_sequence}.jpg"
@@ -738,7 +922,9 @@ class MainWindow(QMainWindow):
         path = self.image_paths[self.current_index]
         started_at = perf_counter()
         try:
-            result_image, result = create_detection_visualization(path)
+            result_image, result = create_detection_visualization(
+                path, show_side_cutting=self.side_cutting_enabled
+            )
         except ValueError as error:
             self._clear_result("검출에 실패했습니다.")
             QMessageBox.critical(self, "검출", str(error))
@@ -746,12 +932,14 @@ class MainWindow(QMainWindow):
 
         elapsed_seconds = perf_counter() - started_at
         images_per_second = 1 / max(elapsed_seconds, 0.000001)
+        self.histogram_image_width = result_image.shape[1]
+        self.histogram_center_split_x = result.center_split_x or self.histogram_image_width // 2
         self._show_original_image(result.source_visualization)
         self._show_result_image(result_image)
         self._show_analysis_preview(result.analysis_preview)
         self._show_source_preview(result.source_preview)
-        self._show_top_contour_histogram(result.measurements)
         self._update_info_label(path, result, elapsed_seconds, images_per_second)
+        self._show_top_contour_histogram(result.measurements)
 
     def _show_result_image(self, bgr_image):
         self.result_pixmap = self._pixmap_from_image(bgr_image)
@@ -797,7 +985,22 @@ class MainWindow(QMainWindow):
             for side_key, side_button in self.histogram_side_buttons.items()
             if side_button is button
         )
+        self._update_histogram_region_controls()
         self._show_top_contour_histogram(self.histogram_measurements)
+
+    def _on_histogram_region_changed(self, button):
+        self.current_histogram_region = next(
+            region_key
+            for region_key, region_button in self.histogram_region_buttons.items()
+            if region_button is button
+        )
+        self._show_top_contour_histogram(self.histogram_measurements)
+
+    def _update_histogram_region_controls(self):
+        """좌·우 분포 필터는 상·하면 y 좌표 분포에서만 사용한다."""
+        enabled = self.current_histogram_side in {"top", "bottom"}
+        for button in self.histogram_region_buttons.values():
+            button.setEnabled(enabled)
 
     def _show_top_contour_histogram(self, measurements):
         """선택한 면에 처음 닿는 모든 좌표의 분포를 표시한다."""
@@ -813,15 +1016,38 @@ class MainWindow(QMainWindow):
             point[coordinate_index]
             for measurement in measurements
             for point in getattr(measurement, point_attribute)
+            if (
+                self.current_histogram_side not in {"top", "bottom"}
+                or self.current_histogram_region == "all"
+                or (
+                    point[0] < self.histogram_center_split_x
+                    if self.current_histogram_region == "left"
+                    else point[0] >= self.histogram_center_split_x
+                )
+            )
         ]
         coordinate_axis = "y" if coordinate_index == 1 else "x"
+        coordinate_range = self._get_histogram_coordinate_range(
+            measurements, coordinate_index
+        )
+        region_name = {
+            "all": "전체",
+            "left": "좌측",
+            "right": "우측",
+        }[self.current_histogram_region]
+        if self.current_histogram_side not in {"top", "bottom"}:
+            region_name = "전체"
         self.top_contour_histogram.set_coordinates(
             coordinates,
             coordinate_axis,
-            self._get_histogram_coordinate_range(measurements, coordinate_index),
+            coordinate_range,
+            self.current_histogram_side,
         )
-        self.histogram_title.setText(title)
-        self.top_contour_count_label.setText(f"전체 {len(coordinates):,}개")
+        self.info_label.setText(
+            "\n".join(self.program_log_lines + self.top_contour_histogram.log_lines)
+        )
+        self.histogram_title.setText(f"{title} · {region_name}")
+        self.top_contour_count_label.setText(f"{region_name} {len(coordinates):,}개")
 
     @staticmethod
     def _get_histogram_coordinate_range(measurements, coordinate_index):
@@ -886,13 +1112,17 @@ class MainWindow(QMainWindow):
         self.result_label.setText(message)
         self.analysis_preview_pixmap = QPixmap()
         self.analysis_preview_label.setPixmap(QPixmap())
-        self.analysis_preview_label.setText("검출된 컨투어 영역의 B 페이지 원본이 표시됩니다.")
+        self.analysis_preview_label.setText(
+            "기둥 기준선을 같은 좌표로 적용한 A/B 페이지 크롭 결과를 비교합니다."
+        )
         self.source_preview_pixmap = QPixmap()
         self.source_preview_label.setPixmap(QPixmap())
         self.source_preview_label.setText(
-            "네 기준선 교점 형태를 유지한 A 페이지 영역이 표시됩니다."
+            "같은 회색 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다."
         )
         self.top_contour_histogram.set_coordinates(())
+        self.histogram_image_width = 0
+        self.histogram_center_split_x = 0
         self.histogram_measurements = []
         self.top_contour_count_label.setText("전체 0개")
         self.status_label.setText("분석 실패")
@@ -903,11 +1133,10 @@ class MainWindow(QMainWindow):
         self, path, result=None, elapsed_seconds=None, images_per_second=None
     ):
         lines = [
-            f"1. 파일 위치 :   {path.name}",
-            f"2. 이미지 크기  {self.original_pixmap.width()} × {self.original_pixmap.height()} px",
+            f"1. 이미지 크기  {self.original_pixmap.width()} × {self.original_pixmap.height()} px",
         ]
         if result is not None:
-            lines.append(f"3. B 페이지 외곽 컨투어 개수 : {len(result.contours)}개")
+            lines.append(f"2. B 페이지 외곽 컨투어 개수 : {len(result.contours)}개")
             point_count = sum(
                 len(measurement.top_points)
                 + len(measurement.bottom_points)
@@ -915,15 +1144,12 @@ class MainWindow(QMainWindow):
                 + len(measurement.right_points)
                 for measurement in result.measurements
             )
-            lines.append(f"4. 4면 첫 접점 개수 : {point_count}개")
+            lines.append(f"3. 4면 첫 접점 개수 : {point_count}개")
             for index, measurement in enumerate(result.measurements, start=1):
                 lines.extend(self._first_contact_log_lines(measurement, index))
-            if elapsed_seconds is not None and images_per_second is not None:
-                lines.append(
-                    f"처리 시간  {elapsed_seconds * 1000:.1f} ms · "
-                    f"{images_per_second:.2f} image/sec"
-                )
-        self.info_label.setText("\n".join(lines))
+            lines.extend(result.density_log_lines)
+        self.program_log_lines = lines
+        self.info_label.setText("\n".join(self.program_log_lines))
 
         if elapsed_seconds is not None and images_per_second is not None:
             self.header_metadata_label.setText(

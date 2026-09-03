@@ -552,13 +552,13 @@ class MainWindow(QMainWindow):
 
         self.analysis_preview_label = self._create_preview_section(
             layout,
-            "B 페이지 컨투어",
-            "검출된 컨투어 영역의 B 페이지 원본이 표시됩니다.",
+            "기둥 기준(Blue) A/B 크롭 비교",
+            "기둥 기준선을 같은 좌표로 적용한 A/B 페이지 크롭 결과를 비교합니다.",
         )
         self.source_preview_label = self._create_preview_section(
             layout,
-            "A 페이지 기준선 교점 사각형 비교",
-            "하늘색 기준선과 기존 회색 기준선 크롭 결과를 나란히 표시합니다.",
+            "최상단/빈도 기준(Gray) 크롭",
+            "같은 회색 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다.",
         )
         histogram_header = QHBoxLayout()
         histogram_header.setContentsMargins(0, 0, 0, 0)
@@ -624,12 +624,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.top_contour_histogram)
         self.analysis_preview_label.clicked.connect(
             lambda: self._show_image_modal(
-                self.analysis_preview_pixmap, "B 페이지 컨투어"
+                self.analysis_preview_pixmap, "기둥 기준(Blue) A/B 크롭 비교"
             )
         )
         self.source_preview_label.clicked.connect(
             lambda: self._show_image_modal(
-                self.source_preview_pixmap, "A 페이지 기준선 교점 사각형 비교"
+                self.source_preview_pixmap, "최상단/빈도 기준(Gray) A/B 크롭 비교"
             )
         )
         return card
@@ -1112,11 +1112,13 @@ class MainWindow(QMainWindow):
         self.result_label.setText(message)
         self.analysis_preview_pixmap = QPixmap()
         self.analysis_preview_label.setPixmap(QPixmap())
-        self.analysis_preview_label.setText("검출된 컨투어 영역의 B 페이지 원본이 표시됩니다.")
+        self.analysis_preview_label.setText(
+            "기둥 기준선을 같은 좌표로 적용한 A/B 페이지 크롭 결과를 비교합니다."
+        )
         self.source_preview_pixmap = QPixmap()
         self.source_preview_label.setPixmap(QPixmap())
         self.source_preview_label.setText(
-            "하늘색 기준선과 기존 회색 기준선 크롭 결과가 표시됩니다."
+            "같은 회색 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다."
         )
         self.top_contour_histogram.set_coordinates(())
         self.histogram_image_width = 0

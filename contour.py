@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 # 검출할 컨투어의 최소/최대 크기
 MIN_CONTOUR_AREA = 3500
@@ -39,14 +39,16 @@ LINE_QUADRILATERAL_METHOD = "primary_axis"
 CONTOUR_COLOR = (247, 85, 168)  # 보라색 (BGR)
 TOP_COLOR = (248, 189, 56)  # 하늘색 (BGR)
 BOTTOM_COLOR = (0, 0, 255)
-LEFT_COLOR = (0, 255, 0)
-RIGHT_COLOR = (0, 255, 255)
 PILLAR_REFERENCE_POINT_COLOR = (128, 128, 128)
 PILLAR_DOWNWARD_COLOR = TOP_COLOR
-PILLAR_POINT_RADIUS = 4
+PILLAR_DOWNWARD_BRIGHT_POINT_COLOR = (255, 230, 180)
+PILLAR_POINT_RADIUS = 1
 PILLAR_REFERENCE_POINT_OUTER_OFFSET = 5
 PILLAR_REFERENCE_BRIGHTNESS_MIN = 250
 PILLAR_REFERENCE_BRIGHTNESS_MAX = 255
+PILLAR_CONTOUR_CONTACT_SCAN_OFFSET = 20
+PILLAR_CONTOUR_COLOR_CHANGE_OFFSET = 5
+PILLAR_BOTTOM_CONTACT_MAX_Y_DIFFERENCE = 5
 HISTOGRAM_PEAK_POINT_COLOR = (82, 68, 240)  # 빨간색 (#F04452, BGR)
 HISTOGRAM_MERGE_POINT_COLOR = (0, 146, 255)  # 주황색 (#FF9200, BGR)
 HISTOGRAM_REMAINDER_POINT_COLOR = (246, 130, 49)  # 파란색 (#3182F6, BGR)
@@ -578,6 +580,32 @@ def get_preview_mask_shape(contour, measurement, mask_mode):
     raise ValueError(f"지원하지 않는 Preview 마스크 방식: {mask_mode}")
 
 
+def expand_polygon_to_side_reference_lines(
+    polygon, left_reference_line, right_reference_line
+):
+    """다각형의 좌·우 변을 컨투어 좌·우 기준선까지 확장한다."""
+
+    if len(left_reference_line) != 2 or len(right_reference_line) != 2:
+        return polygon
+    points = polygon[:, 0, :].astype(float)
+    if len(points) != 4:
+        return polygon
+
+    top_left, top_right, bottom_right, bottom_left = points
+    top_line = (top_left, top_right)
+    bottom_line = (bottom_right, bottom_left)
+    corners = (
+        get_line_intersection(*top_line, *left_reference_line),
+        get_line_intersection(*top_line, *right_reference_line),
+        get_line_intersection(*bottom_line, *right_reference_line),
+        get_line_intersection(*bottom_line, *left_reference_line),
+    )
+    if any(corner is None for corner in corners):
+        return polygon
+    expanded = np.asarray(corners, dtype=np.int32).reshape(-1, 1, 2)
+    return expanded if cv2.contourArea(expanded) > 0 else polygon
+
+
 def get_polygon_crop_bounds(polygon, image_shape):
     """근사 다각형을 포함하는 최소 Crop 범위를 반환한다."""
 
@@ -685,7 +713,8 @@ def find_downward_color_change_points(image, reference_points):
         ) >= SOURCE_PREVIEW_COLOR_CHANGE_MIN_RUN
         transition_y = np.flatnonzero(persistent_change)
         if len(transition_y) == 0:
-            return ()
+            candidate_points.append([])
+            continue
 
         # 같은 색 변화 구간에서 연속으로 나온 y는 첫 지점 하나만 남긴다.
         transition_starts = transition_y[
@@ -696,6 +725,13 @@ def find_downward_color_change_points(image, reference_points):
         )
 
     if len(candidate_points) != 2:
+        return ()
+
+    detected_point_groups = [points for points in candidate_points if points]
+    if len(detected_point_groups) == 1:
+        # 한쪽 점만 검출되면 그 첫 변화점을 수평선 기준으로 사용한다.
+        return (detected_point_groups[0][0],)
+    if len(detected_point_groups) != 2:
         return ()
 
     valid_pairs = [
@@ -749,8 +785,174 @@ def get_pillar_outer_reference_points(image, reference_points):
     return tuple(bright_points)
 
 
+def find_contour_contact_color_change_points(
+    image, reference_points, contour_outline
+):
+    """하늘색 점 아래의 컨투어 접점에서 A 페이지 색 변화를 찾는다."""
+
+    if not reference_points or contour_outline is None:
+        return ()
+
+    grayscale = to_grayscale(image)
+    image_height, image_width = grayscale.shape[:2]
+    if contour_outline.shape[:2] != grayscale.shape[:2]:
+        raise ValueError("컨투어 윤곽선과 A 페이지의 크기가 일치하지 않습니다.")
+
+    change_points = []
+    for point_x, point_y in reference_points:
+        if not 0 <= point_x < image_width:
+            continue
+        start_y = min(
+            max(0, point_y + PILLAR_CONTOUR_CONTACT_SCAN_OFFSET), image_height
+        )
+        contact_y = np.flatnonzero(contour_outline[start_y:, point_x] > 0)
+        if len(contact_y) == 0:
+            continue
+        contact_y = int(start_y + contact_y[0])
+        upper_y = max(0, contact_y - PILLAR_CONTOUR_COLOR_CHANGE_OFFSET)
+        lower_y = min(
+            image_height - 1, contact_y + PILLAR_CONTOUR_COLOR_CHANGE_OFFSET
+        )
+        if (
+            abs(int(grayscale[lower_y, point_x]) - int(grayscale[upper_y, point_x]))
+            >= SOURCE_PREVIEW_EDGE_CHANGE_THRESHOLD
+        ):
+            change_points.append((point_x, contact_y))
+
+    # 양쪽 하늘색 점이 있지만 연한 하늘색 점이 한쪽만 검출되면, 반대편에는
+    # 검출된 점과 같은 y 좌표를 사용해 표시·세로선 기준을 맞춘다.
+    if len(reference_points) == 2 and len(change_points) == 1:
+        detected_x, detected_y = change_points[0]
+        missing_points = [
+            point for point in reference_points if point[0] != detected_x
+        ]
+        if len(missing_points) == 1:
+            change_points.append((missing_points[0][0], detected_y))
+
+    return tuple(sorted(change_points, key=lambda point: point[0]))
+
+
+def find_contour_contact_points(reference_points, contour_outline):
+    """하늘색 점 아래에서 처음 만나는 컨투어 윤곽 접점을 반환한다."""
+
+    if not reference_points or contour_outline is None:
+        return ()
+
+    image_height, image_width = contour_outline.shape[:2]
+    contact_points = []
+    for point_x, point_y in reference_points:
+        if not 0 <= point_x < image_width:
+            continue
+        start_y = min(
+            max(0, point_y + PILLAR_CONTOUR_CONTACT_SCAN_OFFSET), image_height
+        )
+        contact_y = np.flatnonzero(contour_outline[start_y:, point_x] > 0)
+        if len(contact_y) > 0:
+            contact_points.append((point_x, int(start_y + contact_y[0])))
+
+    if len(reference_points) == 2 and len(contact_points) == 1:
+        detected_x, detected_y = contact_points[0]
+        missing_points = [
+            point for point in reference_points if point[0] != detected_x
+        ]
+        if len(missing_points) == 1:
+            contact_points.append((missing_points[0][0], detected_y))
+    return tuple(sorted(contact_points, key=lambda point: point[0]))
+
+
+def get_first_contact_side_lines(measurements, image_height):
+    """컨투어 첫 접점의 최소·최대 x로 좌·우 세로 크롭선을 만든다."""
+
+    left_points = [
+        point for measurement in measurements for point in measurement.left_points
+    ]
+    right_points = [
+        point for measurement in measurements for point in measurement.right_points
+    ]
+    if not left_points or not right_points:
+        return (), ()
+
+    left_x = min(point[0] for point in left_points)
+    right_x = max(point[0] for point in right_points)
+    return (
+        ((left_x, 0), (left_x, image_height - 1)),
+        ((right_x, 0), (right_x, image_height - 1)),
+    )
+
+
+def get_pillar_horizontal_cut_line(points, image_width):
+    """기둥 기준 점을 잇는 컷선을 반환한다."""
+
+    if not points:
+        return None
+    if len(points) == 1:
+        line_y = points[0][1]
+        return ((0, line_y), (image_width - 1, line_y))
+    return tuple(sorted(points, key=lambda point: point[0]))
+
+
+def get_pillar_bottom_cut_line(points, image_width):
+    """좌·우 하단 접점 차이에 따라 연결선 또는 수평 컷선을 반환한다."""
+
+    line = get_pillar_horizontal_cut_line(points, image_width)
+    if line is None or len(points) != 2:
+        return line
+    left_point, right_point = line
+    if abs(left_point[1] - right_point[1]) <= PILLAR_BOTTOM_CONTACT_MAX_Y_DIFFERENCE:
+        return line
+    bottom_y = max(left_point[1], right_point[1])
+    return ((0, bottom_y), (image_width - 1, bottom_y))
+
+
+def find_left_right_contour_reference_points(contour_outline):
+    """상·하 반에서 윤곽의 가장 바깥 좌·우 접점을 찾는다."""
+
+    image_height, _ = contour_outline.shape[:2]
+    midpoint_y = image_height // 2
+    side_points = {"left": [], "right": []}
+    for start_y, end_y in ((0, midpoint_y), (midpoint_y, image_height)):
+        y_coordinates, x_coordinates = np.where(
+            contour_outline[start_y:end_y] > 0
+        )
+        if len(x_coordinates) == 0:
+            continue
+        y_coordinates = y_coordinates + start_y
+        center_y = (start_y + end_y - 1) / 2
+        for side_name, contact_x in (
+            ("left", int(x_coordinates.min())),
+            ("right", int(x_coordinates.max())),
+        ):
+            candidates_y = y_coordinates[x_coordinates == contact_x]
+            contact_y = int(
+                min(candidates_y, key=lambda point_y: abs(point_y - center_y))
+            )
+            side_points[side_name].append((contact_x, contact_y))
+    return tuple(side_points["left"]), tuple(side_points["right"])
+
+
+def draw_left_right_contour_reference_lines(image, left_points, right_points):
+    """A 페이지에 컨투어 좌·우 접점과 세로 방향 기준선을 표시한다."""
+
+    preview = to_bgr(image)
+    for points in (left_points, right_points):
+        if len(points) == 2:
+            cv2.line(
+                preview, points[0], points[1], PILLAR_DOWNWARD_COLOR, 1, cv2.LINE_AA
+            )
+        for point in points:
+            cv2.circle(
+                preview,
+                point,
+                PILLAR_POINT_RADIUS,
+                PILLAR_DOWNWARD_COLOR,
+                thickness=cv2.FILLED,
+                lineType=cv2.LINE_AA,
+            )
+    return preview
+
+
 def draw_top_pillar_reference_points(
-    image, reference_points, downward_points=()
+    image, reference_points, downward_points=(), downward_bright_points=()
 ):
     """원본 A 페이지에 좌우 색 변화 기준점과 필요한 수평선을 표시한다."""
 
@@ -773,8 +975,13 @@ def draw_top_pillar_reference_points(
             lineType=cv2.LINE_AA,
         )
 
-    if len(downward_points) == 2:
-        left_point, right_point = sorted(downward_points, key=lambda point: point[0])
+    if downward_points:
+        if len(downward_points) == 1:
+            point = downward_points[0]
+            left_point = (0, point[1])
+            right_point = (preview.shape[1] - 1, point[1])
+        else:
+            left_point, right_point = sorted(downward_points, key=lambda point: point[0])
         line_y = round((left_point[1] + right_point[1]) / 2)
         cv2.line(
             preview,
@@ -784,8 +991,8 @@ def draw_top_pillar_reference_points(
             thickness=1,
             lineType=cv2.LINE_AA,
         )
-        # 선을 먼저 그린 뒤 점을 덮어 그려 흰색 변화점이 가려지지 않게 한다.
-        for point in (left_point, right_point):
+        # 선을 먼저 그린 뒤 검출된 하늘색 점을 덮어 그린다.
+        for point in downward_points:
             cv2.circle(
                 preview,
                 point,
@@ -794,6 +1001,49 @@ def draw_top_pillar_reference_points(
                 thickness=cv2.FILLED,
                 lineType=cv2.LINE_AA,
             )
+
+    # 하늘색 점 아래의 컨투어 접점에서 색이 변하는 지점은 더 연한 하늘색으로 표시한다.
+    downward_points_by_x = {point[0]: point for point in downward_points}
+    bottom_cut_line = get_pillar_horizontal_cut_line(
+        downward_bright_points, preview.shape[1]
+    )
+    if bottom_cut_line is not None:
+        cv2.line(
+            preview,
+            *bottom_cut_line,
+            PILLAR_DOWNWARD_BRIGHT_POINT_COLOR,
+            thickness=1,
+            lineType=cv2.LINE_AA,
+        )
+    for point in downward_bright_points:
+        source_point = downward_points_by_x.get(point[0])
+        if source_point is not None:
+            cv2.line(
+                preview,
+                source_point,
+                point,
+                PILLAR_DOWNWARD_BRIGHT_POINT_COLOR,
+                thickness=1,
+                lineType=cv2.LINE_AA,
+            )
+        cv2.circle(
+            preview,
+            point,
+            PILLAR_POINT_RADIUS,
+            PILLAR_DOWNWARD_BRIGHT_POINT_COLOR,
+            thickness=cv2.FILLED,
+            lineType=cv2.LINE_AA,
+        )
+    # 세로선이 시작 하늘색 점을 덮지 않도록 마지막에 다시 표시한다.
+    for point in downward_points:
+        cv2.circle(
+            preview,
+            point,
+            PILLAR_POINT_RADIUS,
+            PILLAR_DOWNWARD_COLOR,
+            thickness=cv2.FILLED,
+            lineType=cv2.LINE_AA,
+        )
     return preview
 
 
@@ -823,7 +1073,14 @@ def apply_side_cutting_mask(mask, left, top, top_cut_line, bottom_cut_line):
 
 
 def create_polygon_preview(
-    image, contours, measurements, mask_mode, top_cut_line=None, bottom_cut_line=None
+    image,
+    contours,
+    measurements,
+    mask_mode,
+    top_cut_line=None,
+    bottom_cut_line=None,
+    left_reference_line=(),
+    right_reference_line=(),
 ):
     """선택한 마스크 도형 내부의 원본 픽셀만 남긴 투명 Preview를 만든다."""
 
@@ -832,6 +1089,9 @@ def create_polygon_preview(
         polygon = get_preview_mask_shape(contour, measurement, mask_mode)
         if polygon is None:
             continue
+        polygon = expand_polygon_to_side_reference_lines(
+            polygon, left_reference_line, right_reference_line
+        )
 
         bounds = get_polygon_crop_bounds(polygon, image.shape[:2])
         if bounds is None:
@@ -855,7 +1115,7 @@ def create_polygon_preview(
 
 
 def add_preview_caption(preview, caption):
-    """비교 미리보기 위에 짧은 제목을 붙인다."""
+    """A/B 비교 미리보기 위에 페이지 구분 제목을 붙인다."""
 
     if preview is None or preview.size == 0:
         return None
@@ -866,36 +1126,21 @@ def add_preview_caption(preview, caption):
     labeled[:caption_height, :, :3] = (245, 245, 245)
     labeled[:caption_height, :, 3] = 255
     labeled[caption_height:] = preview
-    # OpenCV 기본 글꼴은 한글을 지원하지 않아 Pillow의 macOS 한글 글꼴을 사용한다.
-    try:
-        font = ImageFont.truetype(
-            "/System/Library/Fonts/AppleSDGothicNeo.ttc", 14
-        )
-        caption_image = Image.fromarray(
-            cv2.cvtColor(labeled, cv2.COLOR_BGRA2RGBA)
-        )
-        ImageDraw.Draw(caption_image).text(
-            (8, 6), caption, font=font, fill=(70, 70, 70, 255)
-        )
-        labeled = cv2.cvtColor(
-            np.asarray(caption_image), cv2.COLOR_RGBA2BGRA
-        )
-    except OSError:
-        cv2.putText(
-            labeled,
-            caption,
-            (8, 21),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
-            (70, 70, 70),
-            1,
-            cv2.LINE_AA,
-        )
+    cv2.putText(
+        labeled,
+        caption,
+        (8, 21),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.48,
+        (70, 70, 70, 255),
+        1,
+        cv2.LINE_AA,
+    )
     return labeled
 
 
 def create_preview_comparison(left_preview, left_caption, right_preview, right_caption):
-    """두 A 페이지 크롭 결과를 나란히 비교할 투명 미리보기로 만든다."""
+    """두 페이지의 같은 기준선 크롭 결과를 나란히 합친다."""
 
     left = add_preview_caption(left_preview, left_caption)
     right = add_preview_caption(right_preview, right_caption)
@@ -1456,30 +1701,35 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         side_name="하면",
     )
 
-    top_cut_boundary = None
-    bottom_cut_boundary = None
-    if show_side_cutting:
-        image_width = gray.shape[1]
-        top_cut_boundary = get_concentrated_cut_line(
+    # 비교용 최상단/빈도(회색) 기준선은 측면 커팅 스위치와 무관하게 계산한다.
+    # 스위치는 원본·B 페이지에 실제 컷선을 그릴지 여부만 제어한다.
+    image_width = gray.shape[1]
+    gray_top_cut_boundary = get_concentrated_cut_line(
+        result.measurements,
+        "top_points",
+        image_width,
+        use_maximum=True,
+        side_name="상면",
+        midpoint_x=center_split_x,
+    )
+    if gray_top_cut_boundary is None:
+        gray_top_cut_boundary = get_side_cut_line(
             result.measurements,
             "top_points",
             image_width,
             use_maximum=True,
-            side_name="상면",
             midpoint_x=center_split_x,
         )
+
+    top_cut_boundary = None
+    bottom_cut_boundary = None
+    if show_side_cutting:
+        top_cut_boundary = gray_top_cut_boundary
         if top_cut_boundary is not None:
-            log_line = top_cut_boundary["density_log_line"]
-            result.density_log_lines.append(log_line)
-            print(log_line)
-        else:
-            top_cut_boundary = get_side_cut_line(
-                result.measurements,
-                "top_points",
-                image_width,
-                use_maximum=True,
-                midpoint_x=center_split_x,
-            )
+            log_line = top_cut_boundary.get("density_log_line")
+            if log_line:
+                result.density_log_lines.append(log_line)
+                print(log_line)
         bottom_cut_boundary = get_concentrated_cut_line(
             result.measurements,
             "bottom_points",
@@ -1521,32 +1771,63 @@ def create_detection_visualization(image_path, show_side_cutting=True):
     pillar_downward_points = find_downward_color_change_points(
         image_a, pillar_outer_reference_points
     )
+    contour_outline = np.zeros(gray.shape, dtype=np.uint8)
+    cv2.drawContours(contour_outline, result.contours, -1, 255, thickness=1)
+    left_contour_points, right_contour_points = (
+        find_left_right_contour_reference_points(contour_outline)
+    )
+    blue_left_reference_line, blue_right_reference_line = (
+        get_first_contact_side_lines(result.measurements, gray.shape[0])
+    )
+    pillar_downward_bright_points = find_contour_contact_color_change_points(
+        image_a, pillar_downward_points, contour_outline
+    )
+    pillar_contour_contact_points = find_contour_contact_points(
+        pillar_downward_points, contour_outline
+    )
+    source_visualization = to_bgr(image_a)
+    cv2.drawContours(source_visualization, result.contours, -1, CONTOUR_COLOR, 1)
+    source_visualization = draw_left_right_contour_reference_lines(
+        source_visualization, left_contour_points, right_contour_points
+    )
     source_visualization = draw_top_pillar_reference_points(
-        image_a, pillar_reference_points, pillar_downward_points
+        source_visualization,
+        pillar_reference_points,
+        pillar_downward_points,
+        pillar_downward_bright_points,
     )
     source_preview_image = to_bgr(image_a)
-    if show_side_cutting:
-        draw_side_cutting_guides(source_visualization, center_split_x)
-        draw_side_cutting_boundary(source_visualization, top_cut_boundary)
-        draw_side_cutting_boundary(source_visualization, bottom_cut_boundary)
     result.source_visualization = source_visualization
-    result.analysis_preview = create_polygon_preview(
-        image_b,
-        result.contours,
-        result.measurements,
-        ANALYSIS_PREVIEW_MASK_MODE,
+    if len(pillar_downward_points) == 2:
+        pillar_top_cut_line = pillar_downward_points
+    elif len(pillar_downward_points) == 1:
+        point_y = pillar_downward_points[0][1]
+        pillar_top_cut_line = ((0, point_y), (gray.shape[1] - 1, point_y))
+    else:
+        pillar_top_cut_line = None
+    pillar_bottom_cut_line = get_pillar_bottom_cut_line(
+        pillar_contour_contact_points, gray.shape[1]
     )
-    pillar_top_cut_line = (
-        pillar_downward_points if len(pillar_downward_points) == 2 else None
-    )
-    existing_top_cut_line = (top_cut_boundary or {}).get("extended_line")
+    existing_top_cut_line = (gray_top_cut_boundary or {}).get("extended_line")
     blue_line_preview = create_polygon_preview(
         source_preview_image,
         result.contours,
         result.measurements,
         SOURCE_PREVIEW_MASK_MODE,
         top_cut_line=pillar_top_cut_line,
-        bottom_cut_line=(bottom_cut_boundary or {}).get("extended_line"),
+        bottom_cut_line=pillar_bottom_cut_line,
+        left_reference_line=blue_left_reference_line,
+        right_reference_line=blue_right_reference_line,
+    )
+    blue_line_b_preview = create_polygon_preview(
+        image_b,
+        result.contours,
+        result.measurements,
+        SOURCE_PREVIEW_MASK_MODE,
+        top_cut_line=pillar_top_cut_line,
+        bottom_cut_line=pillar_bottom_cut_line,
+        left_reference_line=blue_left_reference_line,
+        right_reference_line=blue_right_reference_line,
     )
     gray_line_preview = create_polygon_preview(
         source_preview_image,
@@ -1556,10 +1837,24 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         top_cut_line=existing_top_cut_line,
         bottom_cut_line=(bottom_cut_boundary or {}).get("extended_line"),
     )
-    result.source_preview = create_preview_comparison(
+    gray_line_b_preview = create_polygon_preview(
+        image_b,
+        result.contours,
+        result.measurements,
+        SOURCE_PREVIEW_MASK_MODE,
+        top_cut_line=existing_top_cut_line,
+        bottom_cut_line=(bottom_cut_boundary or {}).get("extended_line"),
+    )
+    result.analysis_preview = create_preview_comparison(
         blue_line_preview,
-        "기둥 기준(Blue)" if pillar_top_cut_line else "기둥 기준(Blue) 미검출",
+        "A Page crop",
+        blue_line_b_preview,
+        "B Page crop",
+    )
+    result.source_preview = create_preview_comparison(
         gray_line_preview,
-        "최상단/빈도 기준(Gray)",
+        "A Page crop",
+        gray_line_b_preview,
+        "B Page crop",
     )
     return result_image, result
